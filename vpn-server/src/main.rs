@@ -63,6 +63,10 @@ struct Args {
     /// Pre-shared key used for client authentication (or set VPN_PSK env var)
     #[arg(long, env = "VPN_PSK")]
     psk: String,
+
+    /// Do not change iptables or IP forwarding (configure NAT manually)
+    #[arg(long, default_value_t = false)]
+    no_nat: bool,
 }
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -135,7 +139,11 @@ async fn main() -> Result<()> {
     info!("TUN device created (server IP: {})", VPN_SERVER_IP);
 
     // ── Kernel routing / NAT ─────────────────────────────────────────────────
-    setup_server_nat().context("Failed to configure iptables / IP forwarding")?;
+    if args.no_nat {
+        info!("Skipping IP forwarding / iptables (no NAT)");
+    } else {
+        setup_server_nat().context("Failed to configure iptables / IP forwarding")?;
+    }
 
     // ── UDP socket ───────────────────────────────────────────────────────────
     let udp = Arc::new(
@@ -195,31 +203,67 @@ fn setup_server_nat() -> Result<()> {
         .context("Failed to enable IP forwarding")?;
     info!("IP forwarding enabled");
 
-    // Remove stale rules silently, then add fresh ones.
-    let _ = Command::new("iptables")
-        .args([
-            "-t", "nat", "-D", "POSTROUTING",
-            "-s", VPN_SUBNET_CIDR, "!", "-o", "tun0",
-            "-j", "MASQUERADE",
-        ])
-        .output();
-    Command::new("iptables")
-        .args([
-            "-t", "nat", "-A", "POSTROUTING",
-            "-s", VPN_SUBNET_CIDR, "!", "-o", "tun0",
-            "-j", "MASQUERADE",
-        ])
-        .output()
-        .context("iptables MASQUERADE")?;
-
-    for dir in ["-i", "-o"] {
-        let _ = Command::new("iptables")
-            .args(["-D", "FORWARD", dir, "tun0", "-j", "ACCEPT"])
-            .output();
-        Command::new("iptables")
-            .args(["-A", "FORWARD", dir, "tun0", "-j", "ACCEPT"])
+    // Ensure SSH and VPN ports stay reachable (idempotent).
+    // We only add rules if missing; we do not flush existing firewall rules.
+    let allow_rules: [&[&str]; 5] = [
+        &["-A", "INPUT", "-p", "tcp", "--dport", "22", "-j", "ACCEPT"],
+        &["-A", "INPUT", "-p", "tcp", "--dport", "8080", "-j", "ACCEPT"],
+        &["-A", "INPUT", "-p", "udp", "--dport", "51820", "-j", "ACCEPT"],
+        &["-A", "INPUT", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
+        &["-A", "INPUT", "-i", "lo", "-j", "ACCEPT"],
+    ];
+    for rule in allow_rules {
+        let mut check = vec!["-C"];
+        check.extend_from_slice(&rule[1..]);
+        let exists = Command::new("iptables")
+            .args(check)
             .output()
-            .with_context(|| format!("iptables FORWARD {dir} tun0"))?;
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !exists {
+            Command::new("iptables")
+                .args(rule)
+                .output()
+                .context("iptables INPUT allow rule")?;
+        }
+    }
+
+    // NAT for VPN subnet (idempotent).
+    let nat_rule = [
+        "-t", "nat", "-A", "POSTROUTING",
+        "-s", VPN_SUBNET_CIDR, "!", "-o", "tun0",
+        "-j", "MASQUERADE",
+    ];
+    let mut nat_check = vec!["-t", "nat", "-C"];
+    nat_check.extend_from_slice(&nat_rule[3..]);
+    let nat_exists = Command::new("iptables")
+        .args(nat_check)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !nat_exists {
+        Command::new("iptables")
+            .args(nat_rule)
+            .output()
+            .context("iptables MASQUERADE")?;
+    }
+
+    // Forwarding between tun0 and the outside (idempotent).
+    for dir in ["-i", "-o"] {
+        let rule = ["-A", "FORWARD", dir, "tun0", "-j", "ACCEPT"];
+        let mut check = vec!["-C"];
+        check.extend_from_slice(&rule[1..]);
+        let exists = Command::new("iptables")
+            .args(check)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !exists {
+            Command::new("iptables")
+                .args(rule)
+                .output()
+                .with_context(|| format!("iptables FORWARD {dir} tun0"))?;
+        }
     }
 
     info!("iptables NAT rules applied");
