@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "vpn-common",
+    "vpn-server",
+    "vpn-client",
+]
+resolver = "2"
