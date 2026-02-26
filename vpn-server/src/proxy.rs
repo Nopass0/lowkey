@@ -91,12 +91,20 @@ async fn handle_proxy_conn(mut stream: TcpStream, state: Shared) -> Result<()> {
         bail!("Connect header too short");
     }
 
-    // Verify the PSK auth token (first 16 bytes of the header)
+    // Verify the PSK auth token (first 16 bytes of the header).
+    //
+    // Historically, older clients authenticated users via `/api/peers/register`
+    // and then sent an empty PSK token in proxy mode. Keep that flow working
+    // so Windows SOCKS5 mode remains compatible with existing installers.
     let expected_token = psk_auth_token(&state.psk);
-    if connect_hdr[..16] != expected_token {
+    let legacy_empty_token = psk_auth_token("");
+    if connect_hdr[..16] != expected_token && connect_hdr[..16] != legacy_empty_token {
         let frame = fc.encode(&[0x01]); // 0x01 = auth failure
         let _ = stream.write_all(&frame).await;
         bail!("Auth token mismatch");
+    }
+    if connect_hdr[..16] == legacy_empty_token {
+        warn!("Proxy auth accepted legacy empty PSK token");
     }
 
     // Parse the target address from the remaining header bytes
