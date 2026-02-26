@@ -31,7 +31,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
-use tokio::{signal, sync::Mutex};
+use tokio::signal;
+#[cfg(unix)]
+use tokio::sync::Mutex;
 use tracing::info;
 use vpn_common::{from_hex, to_hex, VpnCrypto, DEFAULT_API_PORT};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -63,7 +65,7 @@ fn session_path() -> std::path::PathBuf {
 fn load_session() -> Session {
     std::fs::read_to_string(session_path())
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .and_then(|s| serde_json::from_str(s.trim_start_matches('\u{feff}')).ok())
         .unwrap_or_default()
 }
 
@@ -338,6 +340,9 @@ async fn connect(
     socks_port: u16,
     split: bool,
 ) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = split;
+
     // Generate a fresh ephemeral X25519 key pair for this session
     let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
     let public = PublicKey::from(&secret);
@@ -355,7 +360,12 @@ async fn connect(
         .as_str().context("No assigned_ip")?.parse()?;
 
     // Use override ports if provided, otherwise use the server's advertised ports
+    #[cfg(unix)]
     let udp_port   = udp_override
+        .or_else(|| reg["udp_port"].as_u64().map(|p| p as u16))
+        .unwrap_or(51820);
+    #[cfg(not(unix))]
+    let _udp_port = udp_override
         .or_else(|| reg["udp_port"].as_u64().map(|p| p as u16))
         .unwrap_or(51820);
     let proxy_port = proxy_override
@@ -369,7 +379,10 @@ async fn connect(
     let mut spub_arr = [0u8; 32];
     spub_arr.copy_from_slice(&spub);
     let shared = secret.diffie_hellman(&PublicKey::from(spub_arr));
+    #[cfg(unix)]
     let crypto = Arc::new(VpnCrypto::from_shared_secret(&shared));
+    #[cfg(not(unix))]
+    let _crypto = Arc::new(VpnCrypto::from_shared_secret(&shared));
 
     info!("VPN IP: {}  mode: {:?}", vpn_ip, mode);
 
