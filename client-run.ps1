@@ -124,13 +124,56 @@ $RegProxy = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 
 function Enable-SystemProxy ([int]$Port) {
     Set-ItemProperty -Path $RegProxy -Name ProxyServer -Value "socks=127.0.0.1:$Port"
+    Set-ItemProperty -Path $RegProxy -Name ProxyOverride -Value "<local>"
     Set-ItemProperty -Path $RegProxy -Name ProxyEnable -Value 1
+    $env:HTTP_PROXY  = "socks5h://127.0.0.1:$Port"
+    $env:HTTPS_PROXY = "socks5h://127.0.0.1:$Port"
+    $env:ALL_PROXY   = "socks5h://127.0.0.1:$Port"
+    try {
+        Add-Type -Namespace WinInet -Name NativeMethods -MemberDefinition @"
+            [System.Runtime.InteropServices.DllImport("wininet.dll", SetLastError = true)]
+            public static extern bool InternetSetOption(System.IntPtr hInternet, int dwOption, System.IntPtr lpBuffer, int dwBufferLength);
+"@ -ErrorAction SilentlyContinue
+        [WinInet.NativeMethods]::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0) | Out-Null
+        [WinInet.NativeMethods]::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0) | Out-Null
+    } catch {
+        Write-Warn "Could not force proxy refresh via WinInet: $($_.Exception.Message)"
+    }
     Write-Ok "System proxy set: SOCKS5 127.0.0.1:$Port"
 }
 
 function Disable-SystemProxy {
     Set-ItemProperty -Path $RegProxy -Name ProxyEnable -Value 0
+    Remove-Item Env:HTTP_PROXY  -ErrorAction SilentlyContinue
+    Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
+    Remove-Item Env:ALL_PROXY   -ErrorAction SilentlyContinue
+    try {
+        Add-Type -Namespace WinInet -Name NativeMethods -MemberDefinition @"
+            [System.Runtime.InteropServices.DllImport("wininet.dll", SetLastError = true)]
+            public static extern bool InternetSetOption(System.IntPtr hInternet, int dwOption, System.IntPtr lpBuffer, int dwBufferLength);
+"@ -ErrorAction SilentlyContinue
+        [WinInet.NativeMethods]::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0) | Out-Null
+        [WinInet.NativeMethods]::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0) | Out-Null
+    } catch {
+        Write-Warn "Could not force proxy refresh via WinInet: $($_.Exception.Message)"
+    }
     Write-Info "System proxy cleared."
+}
+
+function Test-SocksProxy ([int]$Port) {
+    try {
+        $proxy = New-Object System.Net.WebProxy("socks5://127.0.0.1:$Port")
+        $wc = New-Object System.Net.WebClient
+        $wc.Proxy = $proxy
+        $wc.Encoding = [System.Text.Encoding]::UTF8
+        $null = $wc.DownloadString("https://api.ipify.org")
+        Write-Ok "SOCKS5 tunnel check passed (HTTPS over proxy works)."
+        return $true
+    } catch {
+        Write-Warn "SOCKS5 tunnel check failed: $($_.Exception.Message)"
+        Write-Warn "If websites fail, check antivirus/firewall and disable QUIC in browser."
+        return $false
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -246,6 +289,8 @@ if ($Background) {
 
     "$($job.Id)" | Set-Content $JobFile
     Enable-SystemProxy -Port $listenPort
+    Start-Sleep -Milliseconds 600
+    $null = Test-SocksProxy -Port $listenPort
     Write-Ok "VPN started as background Job $($job.Id)."
     Write-Info "Logs : Get-Content '$LogFile' -Wait"
     Write-Info "Stop : .\client-run.ps1 -Stop"
@@ -256,6 +301,8 @@ if ($Background) {
 # Foreground mode
 # ---------------------------------------------------------------------------
 Enable-SystemProxy -Port $listenPort
+Start-Sleep -Milliseconds 300
+$null = Test-SocksProxy -Port $listenPort
 
 try {
     & $Binary $BinaryArgs
