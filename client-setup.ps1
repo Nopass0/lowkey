@@ -71,6 +71,24 @@ function Write-Banner ([string[]]$lines) {
     Write-Host $bar -ForegroundColor Green
 }
 
+function Get-OptionalPropertyValue {
+    param(
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ($null -eq $Object) {
+        return $null
+    }
+
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($null -eq $prop) {
+        return $null
+    }
+
+    return $prop.Value
+}
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -397,7 +415,10 @@ $subResp   = $null
 
 try {
     $subResp   = Invoke-ApiAuth -Path "/subscription/status" -Token $Token
-    $subStatus = $subResp.sub_status
+    $subStatus = (Get-OptionalPropertyValue -Object $subResp -Name "sub_status")
+    if (-not $subStatus) {
+        $subStatus = "unknown"
+    }
 } catch {
     Write-Warn "Could not fetch subscription status: $_"
 }
@@ -405,8 +426,9 @@ try {
 Write-Host ""
 Write-Host "  Subscription : " -NoNewline
 Write-Host $subStatus -ForegroundColor Yellow
-if ($subResp -and $subResp.sub_expires_at) {
-    Write-Host "  Expires      : $($subResp.sub_expires_at)"
+$subExpiresAt = Get-OptionalPropertyValue -Object $subResp -Name "sub_expires_at"
+if ($subExpiresAt) {
+    Write-Host "  Expires      : $subExpiresAt"
 }
 Write-Host ""
 
@@ -436,8 +458,9 @@ if ($subStatus -ne "active") {
                 $pr = Invoke-ApiAuth -Method Post -Path "/promo/apply" `
                     -Token $Token -Body @{ code = $promoCode.Trim() }
                 Write-Ok "Promo applied: $($pr.message)"
-                if ($pr.sub_expires_at) {
-                    Write-Info "Active until: $($pr.sub_expires_at)"
+                $promoExpiresAt = Get-OptionalPropertyValue -Object $pr -Name "sub_expires_at"
+                if ($promoExpiresAt) {
+                    Write-Info "Active until: $promoExpiresAt"
                 }
             } catch {
                 Write-Warn "Could not apply promo: $_"
@@ -478,21 +501,28 @@ if ($subStatus -ne "active") {
 # Refresh
 try {
     $subResp   = Invoke-ApiAuth -Path "/subscription/status" -Token $Token
-    $subStatus = $subResp.sub_status
+    $subStatus = (Get-OptionalPropertyValue -Object $subResp -Name "sub_status")
+    if (-not $subStatus) {
+        $subStatus = "unknown"
+    }
 } catch { }
 
 $speedLabel = "unknown"
 if ($subResp) {
-    if ($subResp.sub_speed_mbps -eq 0) {
+    $subSpeedMbps = Get-OptionalPropertyValue -Object $subResp -Name "sub_speed_mbps"
+    if ($null -eq $subSpeedMbps) {
+        $speedLabel = "unknown"
+    } elseif ($subSpeedMbps -eq 0) {
         $speedLabel = "unlimited"
     } else {
-        $speedLabel = "$($subResp.sub_speed_mbps) Mbit/s"
+        $speedLabel = "$subSpeedMbps Mbit/s"
     }
 }
 
 $expiryLine = ""
-if ($subResp -and $subResp.sub_expires_at) {
-    $expiryLine = "Expires      : $($subResp.sub_expires_at)"
+$subExpiresAt = Get-OptionalPropertyValue -Object $subResp -Name "sub_expires_at"
+if ($subExpiresAt) {
+    $expiryLine = "Expires      : $subExpiresAt"
 }
 
 Write-Host ""
