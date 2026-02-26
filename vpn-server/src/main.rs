@@ -1,433 +1,281 @@
-//! Lowkey VPN Server
-//!
-//! Architecture
-//! ============
-//!   ┌──────────┐   encrypted UDP   ┌─────────────────┐
-//!   │  Client  │ ◄───────────────► │   vpn-server    │
-//!   └──────────┘                   │                 │
-//!                                  │  TUN (10.0.0.1) │
-//!                                  │  iptables NAT   │
-//!                                  │  HTTP API :8080 │
-//!                                  └─────────────────┘
-//!
-//! UDP packet format (Client → Server):
-//!   [4 B: client VPN IP] [12 B: nonce] [ciphertext + 16 B tag]
-//!
-//! UDP packet format (Server → Client):
-//!   [12 B: nonce] [ciphertext + 16 B tag]
+mod admin_api;
+mod api;
+mod auth_middleware;
+mod dashboard;
+mod db;
+mod models;
+mod proxy;
+mod state;
+mod telegram;
+mod tunnel;
+mod user_api;
 
 use std::{
-    net::{Ipv4Addr, SocketAddr},
-    sync::Arc,
+    collections::VecDeque,
+    sync::{atomic::AtomicU64, Arc},
 };
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    routing::{delete, get, post},
-    Json, Router,
+    routing::{delete, get, post, put},
+    Router,
 };
 use clap::Parser;
 use dashmap::DashMap;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::UdpSocket,
-    sync::{Mutex, RwLock},
-};
-use tracing::{error, info, warn};
+use tokio::{net::UdpSocket, sync::{Mutex, RwLock}, time::Duration};
+use tower_http::cors::CorsLayer;
+use tracing::info;
 
-use vpn_common::{
-    from_hex, parse_dest_ipv4, to_hex, PeerInfo, RegisterRequest, RegisterResponse, StatusResponse,
-    VpnCrypto, DEFAULT_API_PORT, DEFAULT_UDP_PORT, VPN_NETMASK, VPN_SERVER_IP, VPN_SUBNET,
-    VPN_SUBNET_CIDR,
-};
+use vpn_common::{to_hex, DEFAULT_API_PORT, DEFAULT_PROXY_PORT, DEFAULT_UDP_PORT, VPN_NETMASK, VPN_SERVER_IP, VPN_SUBNET};
 use x25519_dalek::{PublicKey, StaticSecret};
+
+use state::{ServerState, Shared};
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "vpn-server",
-    about = "Lowkey VPN Server — routes all client traffic via NAT"
-)]
+#[command(name = "vpn-server", about = "Lowkey VPN Server")]
 struct Args {
-    /// HTTP API port (for peer management)
     #[arg(long, default_value_t = DEFAULT_API_PORT)]
     api_port: u16,
 
-    /// UDP tunnel port
     #[arg(long, default_value_t = DEFAULT_UDP_PORT)]
     udp_port: u16,
 
-    /// Pre-shared key used for client authentication (or set VPN_PSK env var)
-    #[arg(long, env = "VPN_PSK")]
+    #[arg(long, default_value_t = DEFAULT_PROXY_PORT)]
+    proxy_port: u16,
+
+    /// Legacy PSK for direct (non-user) peers
+    #[arg(long, env = "VPN_PSK", default_value = "changeme")]
     psk: String,
+
+    /// PostgreSQL connection URL
+    #[arg(long, env = "DATABASE_URL")]
+    database_url: String,
+
+    /// JWT signing secret
+    #[arg(long, env = "JWT_SECRET", default_value = "change-this-secret")]
+    jwt_secret: String,
+
+    /// Telegram bot token (optional — needed for admin OTP)
+    #[arg(long, env = "TG_BOT_TOKEN")]
+    tg_bot_token: Option<String>,
+
+    /// Telegram admin chat ID (optional)
+    #[arg(long, env = "TG_ADMIN_CHAT_ID")]
+    tg_admin_chat_id: Option<String>,
+
+    /// Disable TUI (useful when running under SSH or systemd)
+    #[arg(long, default_value_t = false)]
+    no_tui: bool,
 }
-
-// ── State ─────────────────────────────────────────────────────────────────────
-
-struct Peer {
-    vpn_ip: Ipv4Addr,
-    /// Set to Some(...) once the server receives the first UDP packet from the client.
-    endpoint: Option<SocketAddr>,
-    crypto: VpnCrypto,
-}
-
-struct ServerState {
-    /// VPN IP  →  Peer
-    peers: DashMap<Ipv4Addr, Arc<RwLock<Peer>>>,
-    /// UDP endpoint  →  VPN IP (filled lazily from incoming packets)
-    endpoints: DashMap<SocketAddr, Ipv4Addr>,
-    next_octet: Mutex<u8>,
-    server_secret: [u8; 32],
-    server_pubkey: [u8; 32],
-    psk: String,
-    udp_port: u16,
-}
-
-type Shared = Arc<ServerState>;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("vpn_server=info".parse()?),
-        )
-        .init();
+    // Set up tracing BEFORE anything else; when TUI is active we redirect
+    // logs to a file so they don't corrupt the alternate-screen display.
+    let use_tui = !std::env::args().any(|a| a == "--no-tui")
+        && std::io::IsTerminal::is_terminal(&std::io::stdout());
+
+    if use_tui {
+        let log_file = std::fs::OpenOptions::new()
+            .create(true).append(true)
+            .open("vpn-server.log")
+            .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+        tracing_subscriber::fmt()
+            .with_writer(std::sync::Mutex::new(log_file))
+            .with_env_filter("info")
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive("vpn_server=info".parse()?),
+            )
+            .init();
+    }
 
     let args = Args::parse();
 
-    // Generate a fresh server X25519 key pair on every start.
+    // ── Database ─────────────────────────────────────────────────────────────
+    let pool = db::create_pool(&args.database_url).await?;
+    db::run_migrations(&pool).await?;
+
+    // ── Server keypair ────────────────────────────────────────────────────────
     let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
     let public = PublicKey::from(&secret);
     let server_secret = secret.to_bytes();
     let server_pubkey = *public.as_bytes();
     info!("Server public key: {}", to_hex(&server_pubkey));
 
+    // ── Detect IPs ────────────────────────────────────────────────────────────
+    let local_ip = detect_local_ip();
+    let public_ip = detect_public_ip().await.unwrap_or_else(|| local_ip.clone());
+    info!("Local: {local_ip}  Public: {public_ip}");
+
+    // ── Shared state ──────────────────────────────────────────────────────────
     let state: Shared = Arc::new(ServerState {
         peers: DashMap::new(),
         endpoints: DashMap::new(),
-        next_octet: Mutex::new(2), // First client gets 10.0.0.2
+        next_octet: Mutex::new(2),
         server_secret,
         server_pubkey,
         psk: args.psk.clone(),
         udp_port: args.udp_port,
+        proxy_port: args.proxy_port,
+        public_ip: RwLock::new(format!("{public_ip}:{}", args.udp_port)),
+        local_ip: RwLock::new(local_ip),
+        start_time: std::time::Instant::now(),
+        total_bytes_in: AtomicU64::new(0),
+        total_bytes_out: AtomicU64::new(0),
+        logs: Mutex::new(VecDeque::new()),
+        pool,
+        jwt_secret: args.jwt_secret.clone(),
+        tg_bot_token: args.tg_bot_token.clone(),
+        tg_admin_chat_id: args.tg_admin_chat_id.clone(),
     });
 
-    // ── TUN interface ────────────────────────────────────────────────────────
+    // ── TUN interface ─────────────────────────────────────────────────────────
     let mut tun_config = tun::Configuration::default();
-    tun_config
-        .address(VPN_SERVER_IP)
-        .netmask(VPN_NETMASK)
-        .destination(VPN_SUBNET)
-        .up();
+    tun_config.address(VPN_SERVER_IP).netmask(VPN_NETMASK).destination(VPN_SUBNET).up();
     #[cfg(target_os = "linux")]
-    tun_config.platform(|c| {
-        c.packet_information(false);
-    });
+    tun_config.platform(|c| { c.packet_information(false); });
 
     let tun_dev = tun::create_as_async(&tun_config)
-        .context("Failed to create TUN device — are you running as root?")?;
-    info!("TUN device created (server IP: {})", VPN_SERVER_IP);
+        .context("TUN creation failed — run as root / grant CAP_NET_ADMIN")?;
+    info!("TUN up ({})", VPN_SERVER_IP);
+    state.push_log(format!("TUN up — {VPN_SERVER_IP}/24"));
 
-    // ── Kernel routing / NAT ─────────────────────────────────────────────────
-    setup_server_nat().context("Failed to configure iptables / IP forwarding")?;
+    setup_nat().context("iptables/ip_forward failed")?;
 
-    // ── UDP socket ───────────────────────────────────────────────────────────
+    // ── UDP socket ────────────────────────────────────────────────────────────
     let udp = Arc::new(
-        UdpSocket::bind(format!("0.0.0.0:{}", args.udp_port))
-            .await
-            .context("Failed to bind UDP socket")?,
+        UdpSocket::bind(format!("0.0.0.0:{}", args.udp_port)).await
+            .context("UDP bind failed")?,
     );
-    info!("UDP tunnel listening on 0.0.0.0:{}", args.udp_port);
+    info!("UDP tunnel on :{}", args.udp_port);
+    state.push_log(format!("UDP on :{}", args.udp_port));
 
-    // ── Split TUN for independent read / write ───────────────────────────────
     let (tun_rx, tun_tx) = tokio::io::split(tun_dev);
     let tun_tx = Arc::new(Mutex::new(tun_tx));
 
-    // TUN → UDP: forward VPN-destined packets to the right peer
     {
-        let (state, udp) = (state.clone(), udp.clone());
+        let (s, u) = (state.clone(), udp.clone());
         tokio::spawn(async move {
-            if let Err(e) = task_tun_to_udp(tun_rx, udp, state).await {
-                error!("tun→udp task exited: {e}");
-            }
+            if let Err(e) = tunnel::task_tun_to_udp(tun_rx, u, s).await { tracing::error!("{e}"); }
+        });
+    }
+    {
+        let (s, u, tw) = (state.clone(), udp.clone(), tun_tx.clone());
+        tokio::spawn(async move {
+            if let Err(e) = tunnel::task_udp_to_tun(u, tw, s).await { tracing::error!("{e}"); }
         });
     }
 
-    // UDP → TUN: receive encrypted packets, decrypt, inject into kernel
+    // ── TCP proxy ─────────────────────────────────────────────────────────────
     {
-        let (state, udp, tun_tx) = (state.clone(), udp.clone(), tun_tx.clone());
+        let s = state.clone();
         tokio::spawn(async move {
-            if let Err(e) = task_udp_to_tun(udp, tun_tx, state).await {
-                error!("udp→tun task exited: {e}");
-            }
+            if let Err(e) = proxy::run_proxy_server(s).await { tracing::error!("{e}"); }
         });
     }
 
-    // ── HTTP API ─────────────────────────────────────────────────────────────
+    // ── HTTP API ──────────────────────────────────────────────────────────────
     let app = Router::new()
-        .route("/api/status", get(api_status))
-        .route("/api/peers", get(api_list_peers))
-        .route("/api/peers/register", post(api_register))
-        .route("/api/peers/:ip", delete(api_remove_peer))
+        // Auth
+        .route("/auth/register",          post(user_api::register))
+        .route("/auth/login",             post(user_api::login))
+        .route("/auth/me",                get(user_api::me))
+        // Subscription & promos (user)
+        .route("/subscription/plans",     get(user_api::list_plans))
+        .route("/subscription/buy",       post(user_api::buy_subscription))
+        .route("/subscription/status",    get(user_api::subscription_status))
+        .route("/promo/apply",            post(user_api::apply_promo))
+        // VPN peers (require auth + active subscription)
+        .route("/api/status",             get(api::api_status))
+        .route("/api/peers",              get(api::api_list_peers))
+        .route("/api/peers/register",     post(api::api_register))
+        .route("/api/peers/:ip",          delete(api::api_remove_peer))
+        .route("/api/peers/:ip/limit",    put(api::api_set_limit))
+        // Admin
+        .route("/admin/request-code",     post(admin_api::request_code))
+        .route("/admin/verify-code",      post(admin_api::verify_code))
+        .route("/admin/promos",           post(admin_api::create_promo))
+        .route("/admin/users",            get(admin_api::list_users))
+        .route("/admin/users/:id/limit",  put(admin_api::set_user_limit))
+        .route("/admin/peers",            get(admin_api::list_peers))
+        .layer(CorsLayer::permissive())
         .with_state(state.clone());
 
     let api_addr = format!("0.0.0.0:{}", args.api_port);
-    info!("HTTP API listening on {api_addr}");
-    let listener = tokio::net::TcpListener::bind(&api_addr).await?;
-    axum::serve(listener, app).await?;
+    info!("HTTP API on {api_addr}");
+    state.push_log(format!("API on {api_addr}"));
 
+    let listener = tokio::net::TcpListener::bind(&api_addr).await?;
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await { tracing::error!("{e}"); }
+    });
+
+    // ── Dashboard or plain wait ───────────────────────────────────────────────
+    if use_tui && !args.no_tui {
+        dashboard::run_dashboard(state).await?;
+    } else {
+        info!("Server running. Ctrl-C to stop. Logs → vpn-server.log");
+        tokio::signal::ctrl_c().await?;
+    }
+
+    info!("Shutting down.");
     Ok(())
 }
 
-// ── Kernel configuration ──────────────────────────────────────────────────────
+// ── NAT ───────────────────────────────────────────────────────────────────────
 
-fn setup_server_nat() -> Result<()> {
+fn setup_nat() -> Result<()> {
     use std::process::Command;
 
-    // Enable IP forwarding
     std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
-        .context("Failed to enable IP forwarding")?;
-    info!("IP forwarding enabled");
+        .context("Cannot enable IP forwarding")?;
 
-    // Remove stale rules silently, then add fresh ones.
     let _ = Command::new("iptables")
-        .args([
-            "-t", "nat", "-D", "POSTROUTING",
-            "-s", VPN_SUBNET_CIDR, "!", "-o", "tun0",
-            "-j", "MASQUERADE",
-        ])
+        .args(["-t","nat","-D","POSTROUTING","-s",vpn_common::VPN_SUBNET_CIDR,"!","-o","tun0","-j","MASQUERADE"])
         .output();
     Command::new("iptables")
-        .args([
-            "-t", "nat", "-A", "POSTROUTING",
-            "-s", VPN_SUBNET_CIDR, "!", "-o", "tun0",
-            "-j", "MASQUERADE",
-        ])
-        .output()
-        .context("iptables MASQUERADE")?;
+        .args(["-t","nat","-A","POSTROUTING","-s",vpn_common::VPN_SUBNET_CIDR,"!","-o","tun0","-j","MASQUERADE"])
+        .output().context("iptables MASQUERADE")?;
 
     for dir in ["-i", "-o"] {
-        let _ = Command::new("iptables")
-            .args(["-D", "FORWARD", dir, "tun0", "-j", "ACCEPT"])
-            .output();
-        Command::new("iptables")
-            .args(["-A", "FORWARD", dir, "tun0", "-j", "ACCEPT"])
-            .output()
-            .with_context(|| format!("iptables FORWARD {dir} tun0"))?;
+        let _ = Command::new("iptables").args(["-D","FORWARD",dir,"tun0","-j","ACCEPT"]).output();
+        Command::new("iptables").args(["-A","FORWARD",dir,"tun0","-j","ACCEPT"])
+            .output().with_context(|| format!("FORWARD {dir} tun0"))?;
     }
-
-    info!("iptables NAT rules applied");
+    info!("NAT configured");
     Ok(())
 }
 
-// ── Tunnel tasks ──────────────────────────────────────────────────────────────
+// ── IP detection ──────────────────────────────────────────────────────────────
 
-/// Read raw IP packets from TUN → encrypt → send to the appropriate peer via UDP.
-async fn task_tun_to_udp(
-    mut tun: impl AsyncReadExt + Unpin,
-    udp: Arc<UdpSocket>,
-    state: Shared,
-) -> Result<()> {
-    let mut buf = vec![0u8; 65536];
-    loop {
-        let n = tun.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        let pkt = &buf[..n];
-
-        let dest = match parse_dest_ipv4(pkt) {
-            Some(ip) => ip,
-            None => continue,
-        };
-
-        // Only handle 10.0.0.0/24 traffic (VPN clients)
-        let oct = dest.octets();
-        if oct[0] != 10 || oct[1] != 0 || oct[2] != 0 {
-            continue;
-        }
-
-        let peer_arc = match state.peers.get(&dest) {
-            Some(p) => p.clone(),
-            None => continue,
-        };
-
-        let peer = peer_arc.read().await;
-        let endpoint = match peer.endpoint {
-            Some(ep) => ep,
-            None => continue, // Client hasn't sent a UDP packet yet
-        };
-
-        let encrypted = peer.crypto.encrypt(pkt);
-        if let Err(e) = udp.send_to(&encrypted, endpoint).await {
-            warn!("UDP send to {endpoint} failed: {e}");
+fn detect_local_ip() -> String {
+    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        let _ = sock.connect("1.1.1.1:80");
+        if let Ok(addr) = sock.local_addr() {
+            return addr.ip().to_string();
         }
     }
-    Ok(())
+    "unknown".into()
 }
 
-/// Receive encrypted UDP packets from clients → decrypt → write to TUN.
-///
-/// Wire format (Client → Server):
-///   [4 B: client VPN IP] [12 B: nonce] [ciphertext]
-async fn task_udp_to_tun(
-    udp: Arc<UdpSocket>,
-    tun: Arc<Mutex<impl AsyncWriteExt + Unpin>>,
-    state: Shared,
-) -> Result<()> {
-    // Extra headroom: 4 B header + 12 B nonce + 16 B tag + max IP packet
-    let mut buf = vec![0u8; 65536 + 64];
-    loop {
-        let (n, src) = udp.recv_from(&mut buf).await?;
-        if n < 5 {
-            continue;
-        }
-
-        // First 4 bytes identify the client's VPN IP.
-        let vpn_ip = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
-        let payload = &buf[4..n];
-
-        let peer_arc = match state.peers.get(&vpn_ip) {
-            Some(p) => p.clone(),
-            None => {
-                warn!("Packet from unknown VPN IP {vpn_ip} (src={src})");
-                continue;
-            }
-        };
-
-        // Learn / update the client's real UDP endpoint.
+async fn detect_public_ip() -> Option<String> {
+    for url in &["https://api4.my-ip.io/ip", "https://api.ipify.org"] {
+        if let Ok(resp) = reqwest::Client::new()
+            .get(*url).timeout(Duration::from_secs(3)).send().await
         {
-            let mut peer = peer_arc.write().await;
-            if peer.endpoint != Some(src) {
-                info!("Endpoint for {vpn_ip}: {src}");
-                if let Some(old) = peer.endpoint {
-                    state.endpoints.remove(&old);
-                }
-                peer.endpoint = Some(src);
-                state.endpoints.insert(src, vpn_ip);
+            if let Ok(t) = resp.text().await {
+                let ip = t.trim().to_string();
+                if !ip.is_empty() && ip.len() < 20 { return Some(ip); }
             }
         }
-
-        let peer = peer_arc.read().await;
-        let plain = match peer.crypto.decrypt(payload) {
-            Some(p) => p,
-            None => {
-                warn!("Decryption failed from {src}");
-                continue;
-            }
-        };
-
-        // Skip keepalive probes (single-byte "hello")
-        if plain == b"hello" {
-            continue;
-        }
-
-        let mut tw = tun.lock().await;
-        if let Err(e) = tw.write_all(&plain).await {
-            error!("TUN write error: {e}");
-        }
     }
-}
-
-// ── HTTP API handlers ─────────────────────────────────────────────────────────
-
-async fn api_status(State(s): State<Shared>) -> Json<StatusResponse> {
-    Json(StatusResponse {
-        running: true,
-        peer_count: s.peers.len(),
-        server_vpn_ip: VPN_SERVER_IP.to_string(),
-        udp_port: s.udp_port,
-    })
-}
-
-async fn api_list_peers(State(s): State<Shared>) -> Json<Vec<PeerInfo>> {
-    let mut out = Vec::new();
-    for entry in s.peers.iter() {
-        let peer = entry.value().read().await;
-        out.push(PeerInfo {
-            vpn_ip: peer.vpn_ip.to_string(),
-            endpoint: peer
-                .endpoint
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "pending".into()),
-        });
-    }
-    Json(out)
-}
-
-async fn api_register(
-    State(s): State<Shared>,
-    Json(req): Json<RegisterRequest>,
-) -> Result<Json<RegisterResponse>, (StatusCode, String)> {
-    // Authenticate
-    if req.psk != s.psk {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid PSK".into()));
-    }
-
-    // Parse client public key
-    let pub_bytes = from_hex(&req.public_key)
-        .filter(|b| b.len() == 32)
-        .ok_or((StatusCode::BAD_REQUEST, "Invalid public key".into()))?;
-    let mut pub_arr = [0u8; 32];
-    pub_arr.copy_from_slice(&pub_bytes);
-
-    // X25519 key exchange
-    let server_secret = StaticSecret::from(s.server_secret);
-    let client_pub = PublicKey::from(pub_arr);
-    let shared = server_secret.diffie_hellman(&client_pub);
-    let crypto = VpnCrypto::from_shared_secret(&shared);
-
-    // Assign next available VPN IP (10.0.0.2 .. 10.0.0.254)
-    let octet = {
-        let mut next = s.next_octet.lock().await;
-        let o = *next;
-        *next = if *next >= 254 { 2 } else { *next + 1 };
-        o
-    };
-    let vpn_ip = Ipv4Addr::new(10, 0, 0, octet);
-
-    s.peers.insert(
-        vpn_ip,
-        Arc::new(RwLock::new(Peer {
-            vpn_ip,
-            endpoint: None,
-            crypto,
-        })),
-    );
-
-    info!("Registered peer → {vpn_ip}");
-
-    Ok(Json(RegisterResponse {
-        server_public_key: to_hex(&s.server_pubkey),
-        assigned_ip: vpn_ip.to_string(),
-        udp_port: s.udp_port,
-        subnet: VPN_SUBNET_CIDR.to_string(),
-    }))
-}
-
-async fn api_remove_peer(
-    State(s): State<Shared>,
-    Path(ip): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let vpn_ip: Ipv4Addr = ip
-        .parse()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid IP".into()))?;
-
-    match s.peers.remove(&vpn_ip) {
-        Some((_, peer_arc)) => {
-            let peer = peer_arc.read().await;
-            if let Some(ep) = peer.endpoint {
-                s.endpoints.remove(&ep);
-            }
-            info!("Removed peer {vpn_ip}");
-            Ok(Json(serde_json::json!({ "status": "removed", "vpn_ip": ip })))
-        }
-        None => Err((StatusCode::NOT_FOUND, "Peer not found".into())),
-    }
+    None
 }

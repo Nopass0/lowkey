@@ -8,17 +8,36 @@ name = "vpn-server"
 path = "src/main.rs"
 
 [dependencies]
-vpn-common    = { path = "../vpn-common" }
+vpn-common   = { path = "../vpn-common" }
 
-tokio         = { version = "1",    features = ["full"] }
-axum          = "0.7"
-tun           = { version = "0.6",  features = ["async"] }
-dashmap       = "5"
-anyhow        = "1"
-clap          = { version = "4",    features = ["derive", "env"] }
-serde_json    = "1"
-tracing       = "0.1"
+tokio        = { version = "1",    features = ["full"] }
+axum         = { version = "0.7",  features = ["macros"] }
+tun          = { version = "0.6",  features = ["async"] }
+dashmap      = "5"
+anyhow       = "1"
+clap         = { version = "4",    features = ["derive", "env"] }
+serde        = { version = "1",    features = ["derive"] }
+serde_json   = "1"
+tracing      = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures      = "0.3"
+tower-http   = { version = "0.5",  features = ["cors"] }
 
-x25519-dalek  = { version = "2",    features = ["static_secrets", "getrandom"] }
-rand          = "0.8"
+# TUI dashboard
+ratatui      = "0.29"
+crossterm    = { version = "0.28", features = ["event-stream"] }
+
+# Database
+sqlx         = { version = "0.7",  features = ["postgres", "runtime-tokio-native-tls", "chrono"] }
+
+# Auth
+jsonwebtoken = "9"
+argon2       = "0.5"
+chrono       = { version = "0.4",  features = ["serde"] }
+rand         = "0.8"
+
+# HTTP client (public IP detection + Telegram)
+reqwest      = { version = "0.12", features = ["json"] }
+
+x25519-dalek = { version = "2",    features = ["static_secrets", "getrandom"] }
+sha2         = "0.10"

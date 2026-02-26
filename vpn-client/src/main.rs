@@ -1,55 +1,50 @@
-//! Lowkey VPN Client
-//!
-//! Usage
-//! -----
-//!   # Connect (runs in foreground; Ctrl-C disconnects cleanly)
-//!   sudo vpn-client connect --server 1.2.3.4 --psk mysecret
-//!
-//!   # With custom ports
-//!   sudo vpn-client connect --server 1.2.3.4 --psk mysecret \
-//!       --api-port 8080 --udp-port 51820
-//!
-//! What it does
-//! ------------
-//!  1. Generates an ephemeral X25519 key pair.
-//!  2. Registers with the server API (POST /api/peers/register).
-//!  3. Creates a local TUN interface (tun0) with the assigned IP.
-//!  4. Saves the current default gateway, then routes ALL traffic via the VPN:
-//!       • server_ip/32  →  original gateway  (so tunnel traffic doesn't loop)
-//!       • default       →  10.0.0.1 via tun0
-//!  5. Runs two tasks:
-//!       tun → udp : reads IP packets from TUN, encrypts, sends to server.
-//!       udp → tun : receives encrypted packets from server, decrypts, writes to TUN.
-//!  6. On Ctrl-C, restores the original routing and exits.
-
-use std::{
-    net::{Ipv4Addr, SocketAddr},
-    sync::Arc,
-};
-
+use std::sync::Arc;
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::UdpSocket,
-    signal,
-    sync::Mutex,
-};
-use tracing::{error, info, warn};
-
-use vpn_common::{
-    from_hex, to_hex, RegisterRequest, RegisterResponse, VpnCrypto,
-    DEFAULT_API_PORT, VPN_NETMASK,
-};
+use clap::{Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
+use tokio::{signal, sync::Mutex};
+use tracing::info;
+use vpn_common::{from_hex, to_hex, VpnCrypto, DEFAULT_API_PORT};
 use x25519_dalek::{PublicKey, StaticSecret};
+
+#[cfg(unix)]
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+// ── Session ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+struct Session {
+    token: Option<String>,
+    server: Option<String>,
+    api_port: Option<u16>,
+}
+
+fn session_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".config").join("lowkey").join("session.json")
+}
+
+fn load_session() -> Session {
+    std::fs::read_to_string(session_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_session(session: &Session) -> Result<()> {
+    let path = session_path();
+    if let Some(p) = path.parent() { std::fs::create_dir_all(p)?; }
+    std::fs::write(&path, serde_json::to_string_pretty(session)?)?;
+    Ok(())
+}
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
+#[derive(Clone, ValueEnum, Debug, PartialEq)]
+enum Mode { Tun, Socks5 }
+
 #[derive(Parser)]
-#[command(
-    name = "vpn-client",
-    about = "Lowkey VPN Client — routes all traffic through a Lowkey VPN server"
-)]
+#[command(name = "vpn-client", about = "Lowkey VPN Client")]
 struct Args {
     #[command(subcommand)]
     command: Cmd,
@@ -57,329 +52,378 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Connect to a VPN server (runs in the foreground; Ctrl-C to disconnect)
+    Auth { #[command(subcommand)] sub: AuthCmd },
+    Subscription { #[command(subcommand)] sub: SubCmd },
+    Promo {
+        #[arg(short, long)] server: Option<String>,
+        #[arg(long, default_value_t = DEFAULT_API_PORT)] api_port: u16,
+        #[arg(short, long)] code: String,
+    },
     Connect {
-        /// Server IP or hostname
-        #[arg(short, long)]
-        server: String,
-
-        /// Pre-shared key (must match the server's VPN_PSK)
-        #[arg(short, long)]
-        psk: String,
-
-        /// Server HTTP API port
-        #[arg(long, default_value_t = DEFAULT_API_PORT)]
-        api_port: u16,
-
-        /// Server UDP tunnel port (defaults to the port returned by the server)
-        #[arg(long)]
-        udp_port: Option<u16>,
-
-        /// Route only VPN subnet traffic (split tunnel); default routes ALL traffic
-        #[arg(long, default_value_t = false)]
-        split_tunnel: bool,
+        #[arg(short, long)] server: Option<String>,
+        #[arg(long, default_value_t = DEFAULT_API_PORT)] api_port: u16,
+        #[arg(long, default_value = "tun")] mode: Mode,
+        #[arg(long)] udp_port: Option<u16>,
+        #[arg(long)] proxy_port: Option<u16>,
+        #[arg(long, default_value_t = 1080)] socks_port: u16,
+        #[arg(long, default_value_t = false)] split_tunnel: bool,
     },
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
+#[derive(Subcommand)]
+enum AuthCmd {
+    Register {
+        #[arg(short, long)] server: String,
+        #[arg(long, default_value_t = DEFAULT_API_PORT)] api_port: u16,
+        #[arg(short, long)] login: String,
+        #[arg(short, long)] password: String,
+    },
+    Login {
+        #[arg(short, long)] server: String,
+        #[arg(long, default_value_t = DEFAULT_API_PORT)] api_port: u16,
+        #[arg(short, long)] login: String,
+        #[arg(short, long)] password: String,
+    },
+    Me {
+        #[arg(short, long)] server: Option<String>,
+        #[arg(long, default_value_t = DEFAULT_API_PORT)] api_port: u16,
+    },
+    Logout,
+}
+
+#[derive(Subcommand)]
+enum SubCmd {
+    Plans {
+        #[arg(short, long)] server: Option<String>,
+        #[arg(long, default_value_t = DEFAULT_API_PORT)] api_port: u16,
+    },
+    Buy {
+        #[arg(short, long)] server: Option<String>,
+        #[arg(long, default_value_t = DEFAULT_API_PORT)] api_port: u16,
+        #[arg(long, default_value = "standard")] plan: String,
+    },
+    Status {
+        #[arg(short, long)] server: Option<String>,
+        #[arg(long, default_value_t = DEFAULT_API_PORT)] api_port: u16,
+    },
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("vpn_client=info".parse()?),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
+            .add_directive("vpn_client=info".parse()?))
         .init();
 
-    let args = Args::parse();
-    match args.command {
-        Cmd::Connect {
-            server,
-            psk,
-            api_port,
-            udp_port,
-            split_tunnel,
-        } => connect(&server, api_port, udp_port, &psk, split_tunnel).await?,
+    match Args::parse().command {
+        Cmd::Auth { sub } => handle_auth(sub).await?,
+        Cmd::Subscription { sub } => handle_sub(sub).await?,
+        Cmd::Promo { server, api_port, code } => {
+            let session = load_session();
+            let srv = server.or(session.server.clone()).context("--server required")?;
+            let tok = session.token.context("Not logged in")?;
+            let resp = api_post(&srv, api_port, "/promo/apply", &tok,
+                &serde_json::json!({ "code": code })).await?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+        }
+        Cmd::Connect { server, api_port, mode, udp_port, proxy_port, socks_port, split_tunnel } => {
+            let session = load_session();
+            let srv = server.or(session.server.clone()).context("--server required")?;
+            let tok = session.token.context("Not logged in. Run: vpn-client auth login")?;
+            connect(&srv, api_port, udp_port, proxy_port, &tok, mode, socks_port, split_tunnel).await?;
+        }
     }
     Ok(())
 }
 
-// ── Connect flow ──────────────────────────────────────────────────────────────
+// ── Auth ──────────────────────────────────────────────────────────────────────
 
-async fn connect(
-    server: &str,
-    api_port: u16,
-    udp_port_override: Option<u16>,
-    psk: &str,
-    split_tunnel: bool,
+async fn handle_auth(cmd: AuthCmd) -> Result<()> {
+    match cmd {
+        AuthCmd::Register { server, api_port, login, password } => {
+            let resp = api_anon(&server, api_port, "/auth/register",
+                &serde_json::json!({ "login": login, "password": password })).await?;
+            let tok = resp["token"].as_str().unwrap_or("").to_string();
+            println!("Registered as '{}'\n{}", login, serde_json::to_string_pretty(&resp["user"])?);
+            save_session(&Session { token: Some(tok), server: Some(server), api_port: Some(api_port) })?;
+        }
+        AuthCmd::Login { server, api_port, login, password } => {
+            let resp = api_anon(&server, api_port, "/auth/login",
+                &serde_json::json!({ "login": login, "password": password })).await?;
+            let tok = resp["token"].as_str().context("No token")?.to_string();
+            println!("Logged in as '{}'\n{}", login, serde_json::to_string_pretty(&resp["user"])?);
+            save_session(&Session { token: Some(tok), server: Some(server), api_port: Some(api_port) })?;
+        }
+        AuthCmd::Me { server, api_port } => {
+            let s = load_session();
+            let srv = server.or(s.server).context("--server required")?;
+            let tok = s.token.context("Not logged in")?;
+            println!("{}", serde_json::to_string_pretty(&api_get(&srv, api_port, "/auth/me", &tok).await?)?);
+        }
+        AuthCmd::Logout => { save_session(&Session::default())?; println!("Logged out."); }
+    }
+    Ok(())
+}
+
+// ── Subscription ──────────────────────────────────────────────────────────────
+
+async fn handle_sub(cmd: SubCmd) -> Result<()> {
+    match cmd {
+        SubCmd::Plans { server, api_port } => {
+            let s = load_session();
+            let srv = server.or(s.server).context("--server required")?;
+            let resp: serde_json::Value = reqwest::Client::new()
+                .get(format!("http://{}:{}/subscription/plans", srv, api_port))
+                .send().await?.json().await?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+        }
+        SubCmd::Buy { server, api_port, plan } => {
+            let s = load_session();
+            let srv = server.or(s.server.clone()).context("--server required")?;
+            let tok = s.token.context("Not logged in")?;
+            let resp = api_post(&srv, api_port, "/subscription/buy", &tok,
+                &serde_json::json!({ "plan_id": plan })).await?;
+            println!("Subscription activated!\n{}", serde_json::to_string_pretty(&resp)?);
+        }
+        SubCmd::Status { server, api_port } => {
+            let s = load_session();
+            let srv = server.or(s.server).context("--server required")?;
+            let tok = s.token.context("Not logged in")?;
+            println!("{}", serde_json::to_string_pretty(
+                &api_get(&srv, api_port, "/subscription/status", &tok).await?)?);
+        }
+    }
+    Ok(())
+}
+
+// ── Connect ───────────────────────────────────────────────────────────────────
+
+async fn connect(server: &str, api_port: u16, udp_override: Option<u16>,
+    proxy_override: Option<u16>, token: &str, mode: Mode, socks_port: u16, split: bool,
 ) -> Result<()> {
-    // ── 1. Key pair ──────────────────────────────────────────────────────────
     let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
     let public = PublicKey::from(&secret);
-    let client_pubkey = *public.as_bytes();
-    info!("Client public key: {}", to_hex(&client_pubkey));
 
-    // ── 2. Register ──────────────────────────────────────────────────────────
-    info!("Registering with server {}:{} …", server, api_port);
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
-    let reg_resp: RegisterResponse = http
-        .post(format!("http://{}:{}/api/peers/register", server, api_port))
-        .json(&RegisterRequest {
-            public_key: to_hex(&client_pubkey),
-            psk: psk.to_string(),
-        })
-        .send()
-        .await
-        .context("Could not reach server API")?
-        .error_for_status()
-        .context("Server rejected registration (wrong PSK?)")?
-        .json()
-        .await
-        .context("Unexpected server response")?;
+    let reg = api_post(server, api_port, "/api/peers/register", token, &serde_json::json!({
+        "public_key": to_hex(public.as_bytes()), "psk": ""
+    })).await.context("Registration failed — check subscription")?;
 
-    let vpn_ip: Ipv4Addr = reg_resp.assigned_ip.parse().context("Invalid assigned IP")?;
-    let udp_port = udp_port_override.unwrap_or(reg_resp.udp_port);
-    info!(
-        "Assigned IP: {}  |  server UDP port: {}",
-        vpn_ip, udp_port
-    );
+    let vpn_ip: std::net::Ipv4Addr = reg["assigned_ip"].as_str().context("No assigned_ip")?.parse()?;
+    let udp_port  = udp_override.or_else(|| reg["udp_port"].as_u64().map(|p| p as u16)).unwrap_or(51820);
+    let proxy_port = proxy_override.or_else(|| reg["proxy_port"].as_u64().map(|p| p as u16)).unwrap_or(8388);
 
-    // ── 3. Shared secret ─────────────────────────────────────────────────────
-    let spub_bytes = from_hex(&reg_resp.server_public_key)
-        .filter(|b| b.len() == 32)
-        .context("Invalid server public key")?;
-    let mut spub_arr = [0u8; 32];
-    spub_arr.copy_from_slice(&spub_bytes);
-    let server_pub = PublicKey::from(spub_arr);
-    let shared = secret.diffie_hellman(&server_pub);
+    let spub: Vec<u8> = from_hex(reg["server_public_key"].as_str().unwrap_or(""))
+        .filter(|b| b.len() == 32).context("Bad server pubkey")?;
+    let mut spub_arr = [0u8; 32]; spub_arr.copy_from_slice(&spub);
+    let shared = secret.diffie_hellman(&PublicKey::from(spub_arr));
     let crypto = Arc::new(VpnCrypto::from_shared_secret(&shared));
 
-    // ── 4. TUN interface ─────────────────────────────────────────────────────
-    let mut tun_config = tun::Configuration::default();
-    tun_config
-        .address(vpn_ip.to_string().as_str())
-        .netmask(VPN_NETMASK)
-        .destination("10.0.0.1")
-        .up();
-    #[cfg(target_os = "linux")]
-    tun_config.platform(|c| {
-        c.packet_information(false);
-    });
+    info!("VPN IP: {}  mode: {:?}", vpn_ip, mode);
 
-    let tun_dev = tun::create_as_async(&tun_config)
-        .context("Failed to create TUN device — are you running as root?")?;
-    info!("TUN interface up (VPN IP: {})", vpn_ip);
-
-    // ── 5. Routing ───────────────────────────────────────────────────────────
-    let original_gw = get_default_gateway().context("Could not detect current default gateway")?;
-    info!("Original gateway: {original_gw}");
-
-    setup_routing(server, &original_gw, split_tunnel)
-        .context("Failed to configure routing")?;
-    info!(
-        "Routing active ({})",
-        if split_tunnel { "split tunnel" } else { "full tunnel" }
-    );
-
-    // ── 6. UDP socket ────────────────────────────────────────────────────────
-    let udp = Arc::new(
-        UdpSocket::bind("0.0.0.0:0")
-            .await
-            .context("Failed to bind UDP socket")?,
-    );
-    let server_udp: SocketAddr = format!("{server}:{udp_port}")
-        .parse()
-        .context("Invalid server address")?;
-
-    // Send an announcement so the server learns our UDP endpoint immediately.
-    send_announcement(&udp, &crypto, vpn_ip, server_udp).await?;
-
-    // ── 7. Tunnel tasks ──────────────────────────────────────────────────────
-    let (tun_rx, tun_tx) = tokio::io::split(tun_dev);
-    let tun_tx = Arc::new(Mutex::new(tun_tx));
-
-    let vpn_ip_bytes = vpn_ip.octets();
-
-    // TUN → UDP
-    {
-        let (udp, crypto) = (udp.clone(), crypto.clone());
-        tokio::spawn(async move {
-            if let Err(e) =
-                task_tun_to_udp(tun_rx, udp, crypto, vpn_ip_bytes, server_udp).await
-            {
-                error!("tun→udp: {e}");
-            }
-        });
+    match mode {
+        Mode::Tun => {
+            #[cfg(unix)] { run_tun_mode(server, vpn_ip, udp_port, crypto, split).await?; }
+            #[cfg(not(unix))] { anyhow::bail!("TUN requires Linux/macOS. Use --mode socks5"); }
+        }
+        Mode::Socks5 => run_socks5_mode(server, proxy_port, socks_port, token, &secret).await?,
     }
-
-    // UDP → TUN
-    {
-        let (udp, crypto, tun_tx) = (udp.clone(), crypto.clone(), tun_tx.clone());
-        tokio::spawn(async move {
-            if let Err(e) = task_udp_to_tun(udp, tun_tx, crypto).await {
-                error!("udp→tun: {e}");
-            }
-        });
-    }
-
-    // ── 8. Wait for Ctrl-C ───────────────────────────────────────────────────
-    info!("VPN is active. Press Ctrl-C to disconnect.");
-    signal::ctrl_c().await?;
-    info!("Disconnecting …");
-
-    // ── 9. Restore routing ───────────────────────────────────────────────────
-    restore_routing(server, &original_gw, split_tunnel);
-    info!("Routing restored. Disconnected.");
-
     Ok(())
 }
 
-// ── Announcement ──────────────────────────────────────────────────────────────
+// ── TUN mode (Unix) ───────────────────────────────────────────────────────────
 
-/// Send a tiny encrypted probe so the server learns our UDP endpoint.
-async fn send_announcement(
-    udp: &UdpSocket,
-    crypto: &VpnCrypto,
-    vpn_ip: Ipv4Addr,
-    server: SocketAddr,
+#[cfg(unix)]
+async fn run_tun_mode(server: &str, vpn_ip: std::net::Ipv4Addr,
+    udp_port: u16, crypto: Arc<VpnCrypto>, split: bool,
 ) -> Result<()> {
-    let ip_bytes = vpn_ip.octets();
-    let encrypted = crypto.encrypt(b"hello");
-    let mut pkt = Vec::with_capacity(4 + encrypted.len());
-    pkt.extend_from_slice(&ip_bytes);
-    pkt.extend_from_slice(&encrypted);
-    udp.send_to(&pkt, server)
-        .await
-        .context("Failed to send announcement")?;
-    info!("Announcement sent to server");
+    use tokio::net::UdpSocket;
+    let mut cfg = tun::Configuration::default();
+    cfg.address(vpn_ip.to_string().as_str())
+       .netmask(vpn_common::VPN_NETMASK).destination("10.0.0.1").up();
+    cfg.platform(|c| { c.packet_information(false); });
+    let dev = tun::create_as_async(&cfg).context("TUN failed — run as root")?;
+    info!("TUN up ({})", vpn_ip);
+    let orig_gw = get_gw()?;
+    setup_routing(server, &orig_gw, split)?;
+    info!("Routing active. Ctrl-C to disconnect.");
+
+    let udp = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+    let srv: std::net::SocketAddr = format!("{server}:{udp_port}").parse()?;
+    let ib = vpn_ip.octets();
+    { let enc = crypto.encrypt(b"hello"); let mut p = Vec::new(); p.extend_from_slice(&ib); p.extend_from_slice(&enc); udp.send_to(&p, srv).await?; }
+
+    let (rx, tx) = tokio::io::split(dev);
+    let tx = Arc::new(Mutex::new(tx));
+    { let (u,c) = (udp.clone(), crypto.clone()); tokio::spawn(async move { let _ = t2u(rx, u, c, ib, srv).await; }); }
+    { let (u,c,tw) = (udp.clone(), crypto.clone(), tx.clone()); tokio::spawn(async move { let _ = u2t(u, tw, c).await; }); }
+    signal::ctrl_c().await?;
+    restore_routing(server, &orig_gw, split);
     Ok(())
 }
 
-// ── Tunnel tasks ──────────────────────────────────────────────────────────────
-
-/// Read IP packets from TUN → prepend VPN IP header → encrypt → send to server.
-async fn task_tun_to_udp(
-    mut tun: impl AsyncReadExt + Unpin,
-    udp: Arc<UdpSocket>,
-    crypto: Arc<VpnCrypto>,
-    vpn_ip_bytes: [u8; 4],
-    server: SocketAddr,
+#[cfg(unix)]
+async fn t2u(mut tun: impl AsyncReadExt + Unpin, udp: Arc<tokio::net::UdpSocket>,
+    crypto: Arc<VpnCrypto>, ib: [u8; 4], srv: std::net::SocketAddr,
 ) -> Result<()> {
     let mut buf = vec![0u8; 65536];
     loop {
-        let n = tun.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        let pkt = &buf[..n];
-        let encrypted = crypto.encrypt(pkt);
-
-        // Wire: [4 B VPN IP] [encrypted]
-        let mut wire = Vec::with_capacity(4 + encrypted.len());
-        wire.extend_from_slice(&vpn_ip_bytes);
-        wire.extend_from_slice(&encrypted);
-
-        if let Err(e) = udp.send_to(&wire, server).await {
-            warn!("UDP send failed: {e}");
-        }
+        let n = tun.read(&mut buf).await?; if n == 0 { break; }
+        let enc = crypto.encrypt(&buf[..n]);
+        let mut p = Vec::new(); p.extend_from_slice(&ib); p.extend_from_slice(&enc);
+        let _ = udp.send_to(&p, srv).await;
     }
     Ok(())
 }
 
-/// Receive encrypted packets from server → decrypt → write to TUN.
-async fn task_udp_to_tun(
-    udp: Arc<UdpSocket>,
-    tun: Arc<Mutex<impl AsyncWriteExt + Unpin>>,
-    crypto: Arc<VpnCrypto>,
+#[cfg(unix)]
+async fn u2t(udp: Arc<tokio::net::UdpSocket>,
+    tun: Arc<Mutex<impl AsyncWriteExt + Unpin>>, crypto: Arc<VpnCrypto>,
 ) -> Result<()> {
-    let mut buf = vec![0u8; 65536 + 64];
+    let mut buf = vec![0u8; 65600];
     loop {
-        let (n, _src) = udp.recv_from(&mut buf).await?;
-        let data = &buf[..n];
+        let (n, _) = udp.recv_from(&mut buf).await?;
+        if let Some(plain) = crypto.decrypt(&buf[..n]) { let _ = tun.lock().await.write_all(&plain).await; }
+    }
+}
 
-        let plain = match crypto.decrypt(data) {
-            Some(p) => p,
-            None => {
-                warn!("Decryption failed (packet dropped)");
-                continue;
+// ── SOCKS5 mode ───────────────────────────────────────────────────────────────
+
+async fn run_socks5_mode(server: &str, proxy_port: u16, socks_port: u16,
+    token: &str, my_secret: &StaticSecret,
+) -> Result<()> {
+    use tokio::net::TcpListener;
+    let listener = TcpListener::bind(format!("127.0.0.1:{socks_port}"))
+        .await.with_context(|| format!("Cannot bind :{socks_port}"))?;
+    println!("SOCKS5 proxy on 127.0.0.1:{socks_port}\nSet system proxy → SOCKS5 127.0.0.1:{socks_port}\nCtrl-C to disconnect.");
+
+    let sb = my_secret.to_bytes();
+    let sa = format!("{server}:{proxy_port}");
+    let tok = token.to_string();
+    let ctrl_c = signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    loop {
+        tokio::select! {
+            _ = &mut ctrl_c => break,
+            res = listener.accept() => {
+                let (stream, _) = res?;
+                let sa = sa.clone(); let sb = sb; let tok = tok.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = socks5_conn(stream, &sa, &sb, &tok).await {
+                        tracing::trace!("socks5: {e}");
+                    }
+                });
             }
-        };
-
-        let mut tw = tun.lock().await;
-        if let Err(e) = tw.write_all(&plain).await {
-            error!("TUN write error: {e}");
         }
     }
-}
-
-// ── Routing helpers ───────────────────────────────────────────────────────────
-
-fn get_default_gateway() -> Result<String> {
-    let out = std::process::Command::new("sh")
-        .args(["-c", "ip route show default | awk '/default/ {print $3; exit}'"])
-        .output()
-        .context("ip route failed")?;
-    let gw = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if gw.is_empty() {
-        anyhow::bail!("No default gateway found");
-    }
-    Ok(gw)
-}
-
-fn setup_routing(server: &str, original_gw: &str, split_tunnel: bool) -> Result<()> {
-    use std::process::Command;
-
-    if split_tunnel {
-        // Only route VPN subnet traffic through tun0; everything else is unchanged.
-        Command::new("ip")
-            .args(["route", "add", "10.0.0.0/24", "dev", "tun0"])
-            .output()
-            .context("add VPN subnet route")?;
-        return Ok(());
-    }
-
-    // Full tunnel: route ALL traffic via VPN.
-    // Step 1: make sure the VPN server itself is reachable via the real interface.
-    let _ = Command::new("ip")
-        .args(["route", "del", &format!("{server}/32")])
-        .output();
-    Command::new("ip")
-        .args(["route", "add", &format!("{server}/32"), "via", original_gw])
-        .output()
-        .context("add server-specific route")?;
-
-    // Step 2: replace the default route.
-    Command::new("ip")
-        .args(["route", "replace", "default", "via", "10.0.0.1", "dev", "tun0"])
-        .output()
-        .context("replace default route")?;
-
+    println!("Disconnected.");
     Ok(())
 }
 
-fn restore_routing(server: &str, original_gw: &str, split_tunnel: bool) {
+async fn socks5_conn(mut cl: tokio::net::TcpStream, vpn_addr: &str,
+    sb: &[u8; 32], psk: &str,
+) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = [0u8; 512];
+
+    cl.read_exact(&mut buf[..2]).await?;
+    if buf[0] != 5 { anyhow::bail!("Not SOCKS5"); }
+    let nm = buf[1] as usize;
+    cl.read_exact(&mut buf[..nm]).await?;
+    cl.write_all(&[5, 0]).await?;
+
+    cl.read_exact(&mut buf[..4]).await?;
+    if buf[1] != 1 { cl.write_all(&[5,7,0,1,0,0,0,0,0,0]).await?; anyhow::bail!("Only CONNECT"); }
+
+    let (addr_bytes, port): (Vec<u8>, u16) = match buf[3] {
+        1 => { cl.read_exact(&mut buf[..6]).await?; let mut a = vec![1]; a.extend_from_slice(&buf[..4]); (a, u16::from_be_bytes([buf[4],buf[5]])) }
+        3 => { cl.read_exact(&mut buf[..1]).await?; let hl = buf[0] as usize; cl.read_exact(&mut buf[..hl+2]).await?; let mut a = vec![3, hl as u8]; a.extend_from_slice(&buf[..hl]); (a, u16::from_be_bytes([buf[hl],buf[hl+1]])) }
+        4 => { cl.read_exact(&mut buf[..18]).await?; let mut a = vec![4]; a.extend_from_slice(&buf[..16]); (a, u16::from_be_bytes([buf[16],buf[17]])) }
+        _ => anyhow::bail!("Unknown atype"),
+    };
+
+    let my_secret = StaticSecret::from(*sb);
+    let my_pub = PublicKey::from(&my_secret);
+    let mut vs = tokio::net::TcpStream::connect(vpn_addr).await.context("VPN connect failed")?;
+    vs.write_all(my_pub.as_bytes()).await?;
+    let mut spb = [0u8; 32]; vs.read_exact(&mut spb).await?;
+    let fc = vpn_common::FramedCrypto::new(&my_secret, &PublicKey::from(spb));
+
+    let auth = vpn_common::psk_auth_token(psk);
+    let mut hdr = Vec::new(); hdr.extend_from_slice(&auth); hdr.extend_from_slice(&addr_bytes); hdr.extend_from_slice(&port.to_be_bytes());
+    vs.write_all(&fc.encode(&hdr)).await?;
+
+    let status = recv_frame(&mut vs, &fc).await?;
+    if status.first() != Some(&0) { cl.write_all(&[5,5,0,1,0,0,0,0,0,0]).await?; anyhow::bail!("Proxy rejected"); }
+    cl.write_all(&[5,0,0,1,0,0,0,0,0,0]).await?;
+
+    let fc = Arc::new(fc);
+    let (mut crx, mut ctx) = cl.into_split();
+    let (mut vrx, mut vtx) = vs.into_split();
+    let fc1 = fc.clone();
+    let t1 = tokio::spawn(async move {
+        let mut tmp = vec![0u8; 65535];
+        loop { let n = match crx.read(&mut tmp).await { Ok(0)|Err(_)=>break, Ok(n)=>n }; if vtx.write_all(&fc1.encode(&tmp[..n])).await.is_err() { break; } }
+    });
+    let t2 = tokio::spawn(async move {
+        let mut fb = Vec::<u8>::new(); let mut tmp = vec![0u8; 65536];
+        loop {
+            let n = match vrx.read(&mut tmp).await { Ok(0)|Err(_)=>break, Ok(n)=>n };
+            fb.extend_from_slice(&tmp[..n]);
+            loop { match fc.decode(&fb) { Some((p,c)) => { if ctx.write_all(&p).await.is_err(){return;} fb.drain(..c); } None=>break } }
+        }
+    });
+    let _ = tokio::join!(t1, t2);
+    Ok(())
+}
+
+async fn recv_frame(s: &mut tokio::net::TcpStream, fc: &vpn_common::FramedCrypto) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut lb = [0u8;2]; s.read_exact(&mut lb).await?;
+    let cl = u16::from_be_bytes(lb) as usize;
+    let mut raw = vec![0u8; 12+cl]; s.read_exact(&mut raw).await?;
+    let mut buf = Vec::new(); buf.extend_from_slice(&lb); buf.extend_from_slice(&raw);
+    fc.decode(&buf).map(|(p,_)|p).context("Frame decrypt failed")
+}
+
+// ── Routing ───────────────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+fn get_gw() -> Result<String> {
+    let o = std::process::Command::new("sh").args(["-c","ip route show default|awk '/default/{print $3;exit}'"]).output()?;
+    let g = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    if g.is_empty() { anyhow::bail!("No default gateway"); }
+    Ok(g)
+}
+#[cfg(unix)]
+fn setup_routing(server: &str, gw: &str, split: bool) -> Result<()> {
     use std::process::Command;
+    if split { Command::new("ip").args(["route","add","10.0.0.0/24","dev","tun0"]).output()?; return Ok(()); }
+    let _ = Command::new("ip").args(["route","del",&format!("{server}/32")]).output();
+    Command::new("ip").args(["route","add",&format!("{server}/32"),"via",gw]).output()?;
+    Command::new("ip").args(["route","replace","default","via","10.0.0.1","dev","tun0"]).output()?;
+    Ok(())
+}
+#[cfg(unix)]
+fn restore_routing(server: &str, gw: &str, split: bool) {
+    use std::process::Command;
+    if split { let _ = Command::new("ip").args(["route","del","10.0.0.0/24","dev","tun0"]).output(); return; }
+    let _ = Command::new("ip").args(["route","del",&format!("{server}/32")]).output();
+    let _ = Command::new("ip").args(["route","replace","default","via",gw]).output();
+}
 
-    if split_tunnel {
-        let _ = Command::new("ip")
-            .args(["route", "del", "10.0.0.0/24", "dev", "tun0"])
-            .output();
-        return;
-    }
+// ── HTTP helpers ──────────────────────────────────────────────────────────────
 
-    // Remove the server-specific route.
-    let _ = Command::new("ip")
-        .args(["route", "del", &format!("{server}/32")])
-        .output();
-
-    // Restore the original default route.
-    if let Err(e) = Command::new("ip")
-        .args(["route", "replace", "default", "via", original_gw])
-        .output()
-    {
-        error!("Failed to restore default route: {e}");
-    }
+async fn api_anon(server: &str, port: u16, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
+    Ok(reqwest::Client::new().post(format!("http://{}:{}{}", server, port, path))
+        .json(body).send().await?.error_for_status()?.json().await?)
+}
+async fn api_post(server: &str, port: u16, path: &str, tok: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
+    Ok(reqwest::Client::new().post(format!("http://{}:{}{}", server, port, path))
+        .bearer_auth(tok).json(body).send().await?.error_for_status()?.json().await?)
+}
+async fn api_get(server: &str, port: u16, path: &str, tok: &str) -> Result<serde_json::Value> {
+    Ok(reqwest::Client::new().get(format!("http://{}:{}{}", server, port, path))
+        .bearer_auth(tok).send().await?.error_for_status()?.json().await?)
 }
