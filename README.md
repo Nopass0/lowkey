@@ -86,12 +86,15 @@ VPN_PSK=mysecretkey sudo ./vpn-server
 
 # Custom ports
 sudo ./vpn-server --api-port 8080 --udp-port 51820 --psk mysecretkey
+
+# Skip NAT/iptables changes (configure networking manually)
+sudo ./vpn-server --psk mysecretkey --no-nat
 ```
 
 The server will:
 1. Create `tun0` with IP `10.0.0.1/24`.
-2. Enable IP forwarding (`/proc/sys/net/ipv4/ip_forward`).
-3. Add an `iptables` MASQUERADE rule for the VPN subnet.
+2. Enable IP forwarding (`/proc/sys/net/ipv4/ip_forward`) unless `--no-nat`.
+3. Add an `iptables` MASQUERADE rule for the VPN subnet unless `--no-nat`.
 4. Listen for client registrations on the HTTP API.
 5. Accept encrypted tunnel traffic on the UDP port.
 
