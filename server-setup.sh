@@ -367,3 +367,55 @@ SERVER_PID=$!
 echo "$SERVER_PID" > "$PID_FILE"
 ok "Server started with PID $SERVER_PID."
 info "Tail logs: tail -f $SCRIPT_DIR/vpn-server.log"
+
+# =============================================================================
+# 7. CREATE TRIAL PROMO CODE
+# =============================================================================
+# Wait for the server to initialise the database schema before inserting the
+# trial promo code.  We try up to 10 seconds.
+section "Creating trial promo code"
+
+TRIAL_CODE="TRIAL30"
+TRIAL_CREATED=false
+API_PORT_V="${API_PORT:-8080}"
+
+for i in $(seq 1 10); do
+    STATUS_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+        "http://127.0.0.1:${API_PORT_V}/api/status" 2>/dev/null || true)
+    if [[ "$STATUS_HTTP" == "200" ]]; then
+        break
+    fi
+    sleep 1
+done
+
+# Insert the trial code directly via psql if available.
+# The INSERT ... ON CONFLICT DO NOTHING makes it idempotent.
+if command -v psql &>/dev/null && [[ -n "${DATABASE_URL:-}" ]]; then
+    psql "$DATABASE_URL" -c "
+        INSERT INTO promo_codes
+            (code, \"type\", value, extra, max_uses, used_count)
+        VALUES
+            ('$TRIAL_CODE', 'free_days', 30, 0, 9999, 0)
+        ON CONFLICT (code) DO NOTHING;
+    " 2>/dev/null && TRIAL_CREATED=true
+fi
+
+echo ""
+echo -e "${YEL}╔══════════════════════════════════════════════════════╗${RST}"
+echo -e "${YEL}║              TRIAL PROMO CODE                        ║${RST}"
+echo -e "${YEL}╠══════════════════════════════════════════════════════╣${RST}"
+echo -e "${YEL}║${RST}  Code  : ${GRN}$TRIAL_CODE${RST}                               ${YEL}║${RST}"
+echo -e "${YEL}║${RST}  Effect: 30 free VPN days                            ${YEL}║${RST}"
+echo -e "${YEL}║${RST}  Uses  : unlimited                                   ${YEL}║${RST}"
+echo -e "${YEL}╠══════════════════════════════════════════════════════╣${RST}"
+echo -e "${YEL}║${RST}  Share this code with users during client setup.     ${YEL}║${RST}"
+echo -e "${YEL}║${RST}  Run client-setup.sh on the client machine.          ${YEL}║${RST}"
+echo -e "${YEL}╚══════════════════════════════════════════════════════╝${RST}"
+echo ""
+
+if [[ "$TRIAL_CREATED" == "false" ]]; then
+    warn "Could not auto-insert the promo code via psql."
+    warn "Run this SQL manually on the server database:"
+    echo "  INSERT INTO promo_codes (code, \"type\", value, extra, max_uses, used_count)"
+    echo "  VALUES ('$TRIAL_CODE', 'free_days', 30, 0, 9999, 0) ON CONFLICT DO NOTHING;"
+fi
