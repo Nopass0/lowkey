@@ -27,8 +27,8 @@ tower-http   = { version = "0.5",  features = ["cors"] }
 ratatui      = "0.29"
 crossterm    = { version = "0.28", features = ["event-stream"] }
 
-# Database
-sqlx         = { version = "0.7",  features = ["postgres", "runtime-tokio-native-tls", "chrono"] }
+# Database — pure-Rust TLS so no OpenSSL system dependency is needed
+sqlx         = { version = "0.7",  features = ["postgres", "runtime-tokio-rustls", "chrono"] }
 
 # Auth
 jsonwebtoken = "9"
@@ -36,8 +36,8 @@ argon2       = "0.5"
 chrono       = { version = "0.4",  features = ["serde"] }
 rand         = "0.8"
 
-# HTTP client (public IP detection + Telegram)
-reqwest      = { version = "0.12", features = ["json"] }
+# HTTP client (public IP detection + Telegram) — rustls-tls avoids OpenSSL
+reqwest      = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 x25519-dalek = { version = "2",    features = ["static_secrets", "getrandom"] }
 sha2         = "0.10"
