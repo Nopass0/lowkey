@@ -11,11 +11,11 @@
       5. Applies a promo / trial code for a free subscription (TRIAL30)
       6. Shows subscription status
       7. Connects via one of two modes:
-           TUN  (recommended) — system-level VPN using WinTUN driver + WebSocket
+           TUN  (recommended) -- system-level VPN using WinTUN driver + WebSocket
                                 transport. All Windows traffic is routed through
                                 the VPN. Works on networks that block UDP.
                                 Requires: Administrator + wintun.dll
-           SOCKS5             — local proxy on 127.0.0.1:1080. Only apps that
+           SOCKS5             -- local proxy on 127.0.0.1:1080. Only apps that
                                 honour the system proxy setting use the VPN.
 
 .PARAMETER Connect
@@ -641,28 +641,9 @@ if ($subStatus -ne "active") {
     }
 }
 
-# ── Determine connection mode ─────────────────────────────────────────────────
-$UseTun = $Tun.IsPresent
-
-if (-not $Tun.IsPresent -and -not $Connect) {
-    Write-Host ""
-    Write-Host "  Choose connection mode:" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "    1) TUN mode  [RECOMMENDED]" -ForegroundColor Green
-    Write-Host "       System-level VPN — ALL Windows traffic goes through the VPN." -ForegroundColor Gray
-    Write-Host "       Uses WinTUN driver + WebSocket transport (bypasses firewalls)." -ForegroundColor Gray
-    Write-Host "       Requires: run this window as Administrator." -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "    2) SOCKS5 proxy mode" -ForegroundColor Yellow
-    Write-Host "       Local proxy on 127.0.0.1:1080. Only browser/apps that respect" -ForegroundColor Gray
-    Write-Host "       the system proxy setting will use the VPN." -ForegroundColor Gray
-    Write-Host ""
-    $modeChoice = Read-Host "  Mode [1]"
-    if (-not $modeChoice.Trim()) { $modeChoice = "1" }
-    $UseTun = ($modeChoice.Trim() -eq "1")
-}
-
-# ── TUN mode (WinTUN + WebSocket) ─────────────────────────────────────────────
+# -- Default: TUN mode (WinTUN + WebSocket) ------------------------------------
+$UseTun = $true
+# -- TUN mode (WinTUN + WebSocket) ---------------------------------------------
 if ($UseTun) {
     Write-Section "Connecting (TUN / WinTUN + WebSocket)"
 
@@ -682,10 +663,10 @@ if ($UseTun) {
 }
 
 if ($UseTun) {
-    # ── Download wintun.dll if not present ────────────────────────────────────
+    # -- Download wintun.dll if not present ------------------------------------
     $WintunDll = Join-Path (Split-Path $Binary -Parent) "wintun.dll"
     if (-not (Test-Path $WintunDll)) {
-        Write-Info "wintun.dll not found — downloading from wintun.net ..."
+        Write-Info "wintun.dll not found -- downloading from wintun.net ..."
         $WintunZip = Join-Path $env:TEMP "wintun.zip"
         try {
             Invoke-WebRequest `
@@ -752,7 +733,7 @@ if ($UseTun) {
     exit 0
 }
 
-# ── SOCKS5 mode (fallback / user choice) ─────────────────────────────────────
+# -- SOCKS5 mode (fallback / user choice) -------------------------------------
 Write-Section "Connecting (SOCKS5)"
 
 $listenPort = [int]$Conf.SocksPort
