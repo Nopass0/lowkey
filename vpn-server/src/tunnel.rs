@@ -80,12 +80,6 @@ pub async fn task_tun_to_udp(
             None => continue, // no registered peer at this IP
         };
 
-        // Peer must have announced its UDP endpoint at least once
-        let ep = match *peer.endpoint.read().await {
-            Some(ep) => ep,
-            None => continue, // client hasn't sent a packet yet
-        };
-
         // Token-bucket rate limiting (bytes_out direction)
         let limit = peer.limit_bps.load(Ordering::Relaxed);
         {
@@ -95,8 +89,23 @@ pub async fn task_tun_to_udp(
             }
         }
 
-        // Encrypt and send
+        // Encrypt the plaintext IP packet once; deliver via WS or UDP
         let encrypted = peer.crypto.encrypt(pkt);
+
+        // WebSocket peer: push to the per-peer mpsc channel
+        if let Some(ws_tx) = state.ws_peers.get(&dest) {
+            if ws_tx.send(encrypted).is_ok() {
+                peer.bytes_out.fetch_add(n as u64, Ordering::Relaxed);
+                state.total_bytes_out.fetch_add(n as u64, Ordering::Relaxed);
+            }
+            continue;
+        }
+
+        // Classic UDP peer: need a known endpoint
+        let ep = match *peer.endpoint.read().await {
+            Some(ep) => ep,
+            None => continue, // client hasn't sent a packet yet
+        };
         if let Err(e) = udp.send_to(&encrypted, ep).await {
             warn!("UDP send to {ep} failed: {e}");
         } else {

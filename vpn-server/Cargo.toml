@@ -11,7 +11,7 @@ path = "src/main.rs"
 vpn-common   = { path = "../vpn-common" }
 
 tokio        = { version = "1",    features = ["full"] }
-axum         = { version = "0.7",  features = ["macros"] }
+axum         = { version = "0.7",  features = ["macros", "ws"] }
 tun          = { version = "0.6",  features = ["async"] }
 dashmap      = "5"
 anyhow       = "1"

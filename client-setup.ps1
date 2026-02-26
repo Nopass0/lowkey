@@ -10,10 +10,13 @@
       4. Registers a new account OR logs into an existing one
       5. Applies a promo / trial code for a free subscription (TRIAL30)
       6. Shows subscription status
-      7. Connects via SOCKS5 and sets the Windows system proxy automatically
-
-    On Windows only SOCKS5 mode is available (TUN requires Linux/macOS).
-    After connecting, all apps that honour the system proxy will use the VPN.
+      7. Connects via one of two modes:
+           TUN  (recommended) — system-level VPN using WinTUN driver + WebSocket
+                                transport. All Windows traffic is routed through
+                                the VPN. Works on networks that block UDP.
+                                Requires: Administrator + wintun.dll
+           SOCKS5             — local proxy on 127.0.0.1:1080. Only apps that
+                                honour the system proxy setting use the VPN.
 
 .PARAMETER Connect
     Skip setup prompts and reconnect using saved credentials.
@@ -24,14 +27,22 @@
 .PARAMETER Status
     Show account and subscription info, then exit.
 
+.PARAMETER Tun
+    Connect in TUN (WinTUN) mode. Downloads wintun.dll if needed.
+    Requires running as Administrator.
+
 .PARAMETER SocksPort
     Override the local SOCKS5 listen port (default 1080).
 
 .EXAMPLE
+    # Full setup with interactive mode selection
     powershell -ExecutionPolicy Bypass -File .\client-setup.ps1
+
+    # Force TUN (system-level) mode as Administrator
+    powershell -ExecutionPolicy Bypass -File .\client-setup.ps1 -Tun
+
+    # Reconnect with saved credentials
     powershell -ExecutionPolicy Bypass -File .\client-setup.ps1 -Connect
-    powershell -ExecutionPolicy Bypass -File .\client-setup.ps1 -Status
-    powershell -ExecutionPolicy Bypass -File .\client-setup.ps1 -Build
 #>
 
 [CmdletBinding()]
@@ -39,6 +50,7 @@ param(
     [switch]$Connect,
     [switch]$Build,
     [switch]$Status,
+    [switch]$Tun,
     [int]   $SocksPort = 0
 )
 
@@ -617,9 +629,9 @@ if ($Status) {
 }
 
 # ===========================================================================
-# 6. CONNECT (SOCKS5)
+# 6. MODE SELECTION & CONNECT
 # ===========================================================================
-Write-Section "Connecting (SOCKS5)"
+Write-Section "Connection mode"
 
 if ($subStatus -ne "active") {
     Write-Warn "Subscription is not active. Server will likely reject the connection."
@@ -628,6 +640,120 @@ if ($subStatus -ne "active") {
         exit 0
     }
 }
+
+# ── Determine connection mode ─────────────────────────────────────────────────
+$UseTun = $Tun.IsPresent
+
+if (-not $Tun.IsPresent -and -not $Connect) {
+    Write-Host ""
+    Write-Host "  Choose connection mode:" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "    1) TUN mode  [RECOMMENDED]" -ForegroundColor Green
+    Write-Host "       System-level VPN — ALL Windows traffic goes through the VPN." -ForegroundColor Gray
+    Write-Host "       Uses WinTUN driver + WebSocket transport (bypasses firewalls)." -ForegroundColor Gray
+    Write-Host "       Requires: run this window as Administrator." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "    2) SOCKS5 proxy mode" -ForegroundColor Yellow
+    Write-Host "       Local proxy on 127.0.0.1:1080. Only browser/apps that respect" -ForegroundColor Gray
+    Write-Host "       the system proxy setting will use the VPN." -ForegroundColor Gray
+    Write-Host ""
+    $modeChoice = Read-Host "  Mode [1]"
+    if (-not $modeChoice.Trim()) { $modeChoice = "1" }
+    $UseTun = ($modeChoice.Trim() -eq "1")
+}
+
+# ── TUN mode (WinTUN + WebSocket) ─────────────────────────────────────────────
+if ($UseTun) {
+    Write-Section "Connecting (TUN / WinTUN + WebSocket)"
+
+    # Check for Administrator privileges (required for WinTUN)
+    $isAdmin = ([Security.Principal.WindowsPrincipal] `
+        [Security.Principal.WindowsIdentity]::GetCurrent() `
+    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+    if (-not $isAdmin) {
+        Write-Err "TUN mode requires Administrator privileges."
+        Write-Err "Please right-click PowerShell and choose 'Run as Administrator',"
+        Write-Err "then re-run this script with -Tun flag."
+        Write-Err ""
+        Write-Warn "Falling back to SOCKS5 mode for now..."
+        $UseTun = $false
+    }
+}
+
+if ($UseTun) {
+    # ── Download wintun.dll if not present ────────────────────────────────────
+    $WintunDll = Join-Path (Split-Path $Binary -Parent) "wintun.dll"
+    if (-not (Test-Path $WintunDll)) {
+        Write-Info "wintun.dll not found — downloading from wintun.net ..."
+        $WintunZip = Join-Path $env:TEMP "wintun.zip"
+        try {
+            Invoke-WebRequest `
+                -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" `
+                -OutFile $WintunZip -UseBasicParsing
+            # Extract amd64 DLL
+            Expand-Archive -Path $WintunZip -DestinationPath "$env:TEMP\wintun_extracted" -Force
+            $dll = Get-ChildItem "$env:TEMP\wintun_extracted" -Recurse -Filter "wintun.dll" |
+                   Where-Object { $_.DirectoryName -match 'amd64' } |
+                   Select-Object -First 1
+            if (-not $dll) {
+                # Fallback: any wintun.dll
+                $dll = Get-ChildItem "$env:TEMP\wintun_extracted" -Recurse -Filter "wintun.dll" |
+                       Select-Object -First 1
+            }
+            if ($dll) {
+                Copy-Item -Path $dll.FullName -Destination $WintunDll
+                Write-Ok "wintun.dll downloaded to $(Split-Path $Binary -Parent)"
+            } else {
+                throw "wintun.dll not found in downloaded archive"
+            }
+        } catch {
+            Write-Warn "Could not download wintun.dll: $_"
+            Write-Warn "Options:"
+            Write-Warn "  1. Install WireGuard for Windows (https://www.wireguard.com/install/)"
+            Write-Warn "     It installs wintun.dll system-wide automatically."
+            Write-Warn "  2. Download manually from https://www.wintun.net/"
+            Write-Warn "     and place wintun.dll next to vpn-client.exe"
+            Write-Warn ""
+            Write-Warn "Falling back to SOCKS5 mode..."
+            $UseTun = $false
+        }
+    } else {
+        Write-Ok "wintun.dll found: $WintunDll"
+    }
+}
+
+if ($UseTun) {
+    Write-Host ""
+    Write-Banner @(
+        "Lowkey VPN -- TUN Mode (System-Level)",
+        "",
+        "Server       : $($Conf.ServerAddr)",
+        "Transport    : WebSocket (port $($Conf.ApiPort)) -- firewall-safe",
+        "VPN adapter  : WinTUN 'Lowkey'",
+        "",
+        "ALL system traffic is routed through the VPN.",
+        "HTTP, HTTPS, TLS, WebSocket -- everything works.",
+        "",
+        "Press Ctrl-C to disconnect."
+    )
+    Write-Host ""
+
+    # Run vpn-client in TUN + WebSocket mode (no system proxy needed)
+    try {
+        & $Binary connect `
+            --server    $Conf.ServerAddr `
+            --api-port  $Conf.ApiPort `
+            --mode      tun `
+            --transport ws
+    } catch {
+        Write-Err "VPN process exited with error: $_"
+    }
+    exit 0
+}
+
+# ── SOCKS5 mode (fallback / user choice) ─────────────────────────────────────
+Write-Section "Connecting (SOCKS5)"
 
 $listenPort = [int]$Conf.SocksPort
 $inp = Read-Host "  Local SOCKS5 port [$listenPort]"
@@ -647,6 +773,8 @@ Write-Banner @(
     "",
     "Windows Settings -> Network -> Proxy -> Manual",
     "SOCKS Host: 127.0.0.1   Port: $listenPort",
+    "",
+    "Tip: Re-run with -Tun flag as Administrator for system-level VPN.",
     "",
     "Press Ctrl-C to disconnect."
 )

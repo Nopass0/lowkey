@@ -29,11 +29,13 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::signal;
 #[cfg(unix)]
 use tokio::sync::Mutex;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::info;
 use vpn_common::{from_hex, to_hex, VpnCrypto, DEFAULT_API_PORT};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -87,10 +89,21 @@ fn save_session(session: &Session) -> Result<()> {
 /// VPN connection mode.
 #[derive(Clone, ValueEnum, Debug, PartialEq)]
 enum Mode {
-    /// Create a TUN device and route all traffic.  Requires root (Unix only).
+    /// Create a TUN/WinTUN device and route ALL system traffic (all platforms).
     Tun,
     /// Start a local SOCKS5 proxy that tunnels through the server.
     Socks5,
+}
+
+/// Tunnel transport protocol.
+#[derive(Clone, ValueEnum, Debug, PartialEq, Default)]
+enum Transport {
+    /// Encrypted UDP packets (fastest; may be blocked by some firewalls).
+    #[default]
+    Udp,
+    /// Encrypted packets wrapped in WebSocket frames over TCP port 8080.
+    /// Bypasses corporate firewalls and ISP blocking — looks like HTTP traffic.
+    Ws,
 }
 
 #[derive(Parser)]
@@ -131,9 +144,13 @@ enum Cmd {
         server: Option<String>,
         #[arg(long, default_value_t = DEFAULT_API_PORT)]
         api_port: u16,
-        /// Connection mode: `tun` (Linux/macOS, root) or `socks5` (all platforms).
+        /// Connection mode: `tun` (all platforms, requires admin) or `socks5`.
         #[arg(long, default_value = "tun")]
         mode: Mode,
+        /// Transport protocol: `udp` (default, fast) or `ws` (WebSocket,
+        /// bypasses firewalls — recommended on Windows/corporate networks).
+        #[arg(long, default_value = "udp")]
+        transport: Transport,
         /// Override the UDP tunnel port from the server's register response.
         #[arg(long)]
         udp_port: Option<u16>,
@@ -252,6 +269,7 @@ async fn main() -> Result<()> {
             server,
             api_port,
             mode,
+            transport,
             udp_port,
             proxy_port,
             socks_port,
@@ -271,6 +289,7 @@ async fn main() -> Result<()> {
                 proxy_port,
                 &tok,
                 mode,
+                transport,
                 socks_port,
                 split_tunnel,
             )
@@ -412,9 +431,9 @@ async fn handle_sub(cmd: SubCmd) -> Result<()> {
 
 /// Register a peer with the server and start the VPN in the requested mode.
 ///
-/// Performs the API registration handshake to get an assigned VPN IP and the
-/// server's X25519 public key, then dispatches to either [`run_tun_mode`] or
-/// [`run_socks5_mode`].
+/// For `--transport ws` mode, peer registration is handled inside the
+/// WebSocket handshake (no separate REST call is needed).
+/// For `--transport udp` mode, the classic REST + UDP path is used.
 async fn connect(
     server: &str,
     api_port: u16,
@@ -422,13 +441,31 @@ async fn connect(
     proxy_override: Option<u16>,
     token: &str,
     mode: Mode,
+    transport: Transport,
     socks_port: u16,
     split: bool,
 ) -> Result<()> {
+    // WebSocket transport: the WS handshake handles peer registration inline.
+    if transport == Transport::Ws {
+        let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        match mode {
+            Mode::Tun => {
+                run_ws_tun_mode(server, api_port, token, Arc::new(secret), split).await?;
+            }
+            Mode::Socks5 => {
+                // Even in SOCKS5 mode, the user explicitly asked for WS transport.
+                // We still use the TCP proxy here; the transport flag only affects TUN.
+                let proxy_port = proxy_override.unwrap_or(vpn_common::DEFAULT_PROXY_PORT);
+                run_socks5_mode(server, proxy_port, socks_port, &secret).await?;
+            }
+        }
+        return Ok(());
+    }
+
+    // ── Classic UDP transport ─────────────────────────────────────────────────
     #[cfg(not(unix))]
     let _ = split;
 
-    // Generate a fresh ephemeral X25519 key pair for this session
     let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
     let public = PublicKey::from(&secret);
 
@@ -446,13 +483,11 @@ async fn connect(
     .await
     .context("Registration failed — check subscription")?;
 
-    // Parse the assigned VPN IP
     let vpn_ip: std::net::Ipv4Addr = reg["assigned_ip"]
         .as_str()
         .context("No assigned_ip")?
         .parse()?;
 
-    // Use override ports if provided, otherwise use the server's advertised ports
     #[cfg(unix)]
     let udp_port = udp_override
         .or_else(|| reg["udp_port"].as_u64().map(|p| p as u16))
@@ -465,7 +500,6 @@ async fn connect(
         .or_else(|| reg["proxy_port"].as_u64().map(|p| p as u16))
         .unwrap_or(8388);
 
-    // Parse server's X25519 public key and complete the DH handshake
     let spub: Vec<u8> = from_hex(reg["server_public_key"].as_str().unwrap_or(""))
         .filter(|b| b.len() == 32)
         .context("Bad server pubkey")?;
@@ -477,7 +511,7 @@ async fn connect(
     #[cfg(not(unix))]
     let _crypto = Arc::new(VpnCrypto::from_shared_secret(&shared));
 
-    info!("VPN IP: {}  mode: {:?}", vpn_ip, mode);
+    info!("VPN IP: {}  mode: {:?}  transport: udp", vpn_ip, mode);
 
     match mode {
         Mode::Tun => {
@@ -486,7 +520,8 @@ async fn connect(
             #[cfg(not(unix))]
             {
                 tracing::warn!(
-                    "TUN is not available on this platform yet; falling back to VLESS-over-SOCKS5"
+                    "UDP transport with TUN requires Linux/macOS. \
+                     Use --transport ws for Windows TUN mode."
                 );
                 run_socks5_mode(server, proxy_port, socks_port, &secret).await?;
             }
@@ -494,6 +529,356 @@ async fn connect(
         Mode::Socks5 => run_socks5_mode(server, proxy_port, socks_port, &secret).await?,
     }
     Ok(())
+}
+
+// ── WebSocket TUN mode (all platforms) ───────────────────────────────────────
+
+/// Connect via WebSocket transport with a system-level TUN/WinTUN adapter.
+///
+/// Recommended for Windows and for any network that blocks raw UDP.
+/// The VPN tunnel travels as binary WebSocket frames over TCP port 8080,
+/// which looks identical to regular HTTP traffic to firewalls and ISPs.
+///
+/// Architecture:
+/// ```text
+///   TUN/WinTUN ──► [tun→ws channel] ──► WS encrypt task ──► WebSocket
+///   TUN/WinTUN ◄── [ws→tun channel] ◄── WS decrypt task ◄── WebSocket
+/// ```
+async fn run_ws_tun_mode(
+    server: &str,
+    api_port: u16,
+    token: &str,
+    secret: Arc<StaticSecret>,
+    split: bool,
+) -> Result<()> {
+    let url = format!("ws://{}:{}/ws-tunnel?token={}", server, api_port, token);
+    info!("WS tunnel → {}", url);
+
+    let (ws, _) = connect_async(url.as_str())
+        .await
+        .context("WebSocket connection failed — check server address and network")?;
+    // Explicit type to help the compiler resolve the SinkExt/StreamExt impls
+    let ws: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    > = ws;
+    let (mut ws_sink, mut ws_stream) = ws.split();
+
+    // ── Handshake ─────────────────────────────────────────────────────────────
+    // Frame 1 (client→server): 32-byte X25519 ephemeral public key
+    let public = PublicKey::from(secret.as_ref());
+    ws_sink
+        .send(Message::Binary(public.as_bytes().to_vec().into()))
+        .await
+        .context("WS handshake send failed")?;
+
+    // Frame 2 (server→client): 32-byte server pubkey + 4-byte assigned VPN IP
+    let resp = loop {
+        match ws_stream.next().await {
+            Some(Ok(Message::Binary(b))) if b.len() == 36 => break b,
+            Some(Ok(Message::Ping(d))) => {
+                let _ = ws_sink.send(Message::Pong(d)).await;
+            }
+            other => anyhow::bail!("Unexpected WS handshake frame: {:?}", other),
+        }
+    };
+    let mut spub_arr = [0u8; 32];
+    spub_arr.copy_from_slice(&resp[..32]);
+    let vpn_ip = std::net::Ipv4Addr::new(resp[32], resp[33], resp[34], resp[35]);
+    let shared = secret.diffie_hellman(&PublicKey::from(spub_arr));
+    let crypto = Arc::new(VpnCrypto::from_shared_secret(&shared));
+    info!("WS handshake OK — VPN IP: {}", vpn_ip);
+
+    // ── Keepalive ─────────────────────────────────────────────────────────────
+    ws_sink
+        .send(Message::Binary(crypto.encrypt(b"hello").into()))
+        .await
+        .context("WS keepalive send failed")?;
+
+    // ── Bridge channels ───────────────────────────────────────────────────────
+    // tun_to_ws_tx  — plaintext IP packets read from TUN → encrypt → WS send task
+    // ws_to_tun_tx  — plaintext IP packets decoded from WS → write to TUN
+    let (tun_to_ws_tx, mut tun_to_ws_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let (ws_to_tun_tx, ws_to_tun_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+
+    // WS send task: encrypt packets from TUN and push them as binary frames
+    let c_enc = crypto.clone();
+    tokio::spawn(async move {
+        while let Some(plain) = tun_to_ws_rx.recv().await {
+            let enc = c_enc.encrypt(&plain);
+            if ws_sink.send(Message::Binary(enc.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // WS recv task: receive binary frames, decrypt, push plaintext to TUN
+    let c_dec = crypto.clone();
+    tokio::spawn(async move {
+        while let Some(msg) = ws_stream.next().await {
+            match msg {
+                Ok(Message::Binary(data)) => {
+                    if let Some(plain) = c_dec.decrypt(&data) {
+                        if plain != b"hello" {
+                            let _ = ws_to_tun_tx.send(plain);
+                        }
+                    }
+                }
+                Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
+                _ => break,
+            }
+        }
+    });
+
+    // ── Platform-specific TUN forwarding ──────────────────────────────────────
+    #[cfg(unix)]
+    ws_tun_unix(server, vpn_ip, split, tun_to_ws_tx, ws_to_tun_rx).await?;
+
+    #[cfg(windows)]
+    ws_tun_windows(server, vpn_ip, tun_to_ws_tx, ws_to_tun_rx).await?;
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (split, tun_to_ws_tx, ws_to_tun_rx);
+        anyhow::bail!("TUN mode is not supported on this platform");
+    }
+
+    Ok(())
+}
+
+// ── Unix WS-TUN helper ────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+async fn ws_tun_unix(
+    server: &str,
+    vpn_ip: std::net::Ipv4Addr,
+    split: bool,
+    tun_to_ws: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    mut ws_to_tun: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut cfg = tun::Configuration::default();
+    cfg.address(vpn_ip.to_string().as_str())
+        .netmask(vpn_common::VPN_NETMASK)
+        .destination(vpn_common::VPN_SERVER_IP)
+        .up();
+    cfg.platform(|c| { c.packet_information(false); });
+    let dev = tun::create_as_async(&cfg).context("TUN failed — run as root")?;
+    info!("TUN up ({})", vpn_ip);
+
+    let orig_gw = get_gw()?;
+    setup_routing(server, &orig_gw, split)?;
+    info!("WS-TUN routing active. Ctrl-C to disconnect.");
+
+    let (mut tun_r, tun_w) = tokio::io::split(dev);
+    let tun_w = Arc::new(tokio::sync::Mutex::new(tun_w));
+
+    // TUN read → WS send channel
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        loop {
+            let n = match tun_r.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            if tun_to_ws.send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+
+    // WS recv channel → TUN write
+    let tw = tun_w.clone();
+    tokio::spawn(async move {
+        while let Some(plain) = ws_to_tun.recv().await {
+            let _ = tw.lock().await.write_all(&plain).await;
+        }
+    });
+
+    signal::ctrl_c().await?;
+    restore_routing(server, &orig_gw, split);
+    Ok(())
+}
+
+// ── Windows WS-TUN helper (WinTUN) ───────────────────────────────────────────
+
+/// WS-TUN relay for Windows using the WinTUN kernel driver.
+///
+/// **Requirements**: `wintun.dll` must be present next to `vpn-client.exe`,
+/// OR WireGuard for Windows must be installed (it installs wintun globally).
+/// Download wintun.dll from <https://www.wintun.net/> if needed.
+///
+/// Must be run as Administrator.
+#[cfg(windows)]
+async fn ws_tun_windows(
+    server: &str,
+    vpn_ip: std::net::Ipv4Addr,
+    tun_to_ws: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    mut ws_to_tun: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Load WinTUN driver
+    let wintun = unsafe {
+        wintun::load().context(
+            "wintun.dll not found.\n\
+             Options:\n\
+             1. Copy wintun.dll next to vpn-client.exe\n\
+             2. Install WireGuard for Windows (includes wintun)\n\
+             Download: https://www.wintun.net/",
+        )?
+    };
+
+    // Open or create the virtual adapter
+    let adapter = match wintun::Adapter::open(&wintun, "Lowkey") {
+        Ok(a) => { info!("Reusing WinTUN adapter 'Lowkey'"); a }
+        Err(_) => {
+            info!("Creating WinTUN adapter 'Lowkey'");
+            wintun::Adapter::create(&wintun, "Lowkey", "WireGuard", None)
+                .context("Create WinTUN adapter failed — run as Administrator")?
+        }
+    };
+
+    let session = Arc::new(
+        adapter.start_session(wintun::MAX_RING_CAPACITY)
+            .context("WinTUN start_session failed")?,
+    );
+
+    // Assign IP address
+    configure_win_adapter_ip(&vpn_ip.to_string())?;
+    info!("WinTUN adapter up ({})", vpn_ip);
+
+    // Configure routing
+    let orig_gw = get_windows_gateway()?;
+    setup_windows_routing(server, &orig_gw)?;
+    info!("Windows routing active. Ctrl-C to disconnect.");
+
+    let running = Arc::new(AtomicBool::new(true));
+
+    // WinTUN read thread → tun_to_ws channel (blocking I/O in std thread)
+    {
+        let sess = session.clone();
+        let tx = tun_to_ws.clone();
+        let r = running.clone();
+        std::thread::spawn(move || {
+            while r.load(Ordering::Relaxed) {
+                match sess.receive_blocking() {
+                    Ok(pkt) => {
+                        let bytes = pkt.bytes().to_vec();
+                        drop(pkt);
+                        if tx.send(bytes).is_err() { break; }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    // ws_to_tun channel → WinTUN write thread (blocking I/O in std thread)
+    {
+        let sess = session.clone();
+        let r = running.clone();
+        // Bridge async receiver to a std::sync::mpsc for the blocking thread
+        let (std_tx, std_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
+
+        // Async forwarder: ws_to_tun → std_tx
+        tokio::spawn(async move {
+            while let Some(plain) = ws_to_tun.recv().await {
+                if std_tx.send(plain).is_err() { break; }
+            }
+        });
+
+        // Blocking writer: std_rx → WinTUN
+        std::thread::spawn(move || {
+            while r.load(Ordering::Relaxed) {
+                match std_rx.recv() {
+                    Ok(plain) => {
+                        if let Ok(mut pkt) = sess.allocate_send_packet(plain.len() as u16) {
+                            pkt.bytes_mut().copy_from_slice(&plain);
+                            sess.send_packet(pkt);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    signal::ctrl_c().await?;
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
+    restore_windows_routing(server, &orig_gw);
+    println!("WinTUN disconnected.");
+    Ok(())
+}
+
+// ── Windows helpers ───────────────────────────────────────────────────────────
+
+#[cfg(windows)]
+fn configure_win_adapter_ip(ip: &str) -> Result<()> {
+    use std::process::Command;
+    Command::new("netsh")
+        .args([
+            "interface", "ip", "set", "address",
+            "Lowkey", "static", ip,
+            vpn_common::VPN_NETMASK, vpn_common::VPN_SERVER_IP,
+        ])
+        .output()
+        .context("netsh: failed to set WinTUN adapter IP")?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn get_windows_gateway() -> Result<String> {
+    use std::process::Command;
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile", "-Command",
+            "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | \
+              Sort-Object -Property RouteMetric | \
+              Select-Object -First 1).NextHop",
+        ])
+        .output()
+        .context("powershell: could not detect default gateway")?;
+    let gw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if gw.is_empty() {
+        anyhow::bail!("No default gateway detected");
+    }
+    Ok(gw)
+}
+
+/// Add two /1 routes covering all IPv4 space via VPN, plus a host route
+/// for the VPN server via the original gateway to avoid routing loops.
+#[cfg(windows)]
+fn setup_windows_routing(server: &str, orig_gw: &str) -> Result<()> {
+    use std::process::Command;
+    let _ = Command::new("route").args(["delete", server]).output();
+    Command::new("route")
+        .args(["add", server, "mask", "255.255.255.255", orig_gw])
+        .output()
+        .context("route add: server host route")?;
+    for net in ["0.0.0.0", "128.0.0.0"] {
+        let _ = Command::new("route")
+            .args(["delete", net, "mask", "128.0.0.0"])
+            .output();
+        Command::new("route")
+            .args(["add", net, "mask", "128.0.0.0", vpn_common::VPN_SERVER_IP])
+            .output()
+            .with_context(|| format!("route add {net}/1 via VPN"))?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restore_windows_routing(server: &str, _orig_gw: &str) {
+    use std::process::Command;
+    let _ = Command::new("route").args(["delete", server]).output();
+    for net in ["0.0.0.0", "128.0.0.0"] {
+        let _ = Command::new("route")
+            .args(["delete", net, "mask", "128.0.0.0"])
+            .output();
+    }
 }
 
 // ── TUN mode (Unix only) ──────────────────────────────────────────────────────
