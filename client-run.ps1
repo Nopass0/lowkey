@@ -60,7 +60,8 @@ function Write-Banner ([string[]]$lines) {
 # Paths
 # ---------------------------------------------------------------------------
 $ScriptDir    = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Binary       = Join-Path $ScriptDir "vpn-client\target\release\vpn-client.exe"
+# Cargo workspace puts the binary in workspace root target\, not the crate's target\
+$Binary       = Join-Path $ScriptDir "target\release\vpn-client.exe"
 $ConfDir      = Join-Path $env:USERPROFILE ".config\lowkey"
 $ConfFile     = Join-Path $ConfDir "client.conf"
 $SessionFile  = Join-Path $ConfDir "session.json"

@@ -76,7 +76,8 @@ function Write-Banner ([string[]]$lines) {
 # ---------------------------------------------------------------------------
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ClientDir   = Join-Path $ScriptDir "vpn-client"
-$Binary      = Join-Path $ClientDir "target\release\vpn-client.exe"
+# Cargo workspace puts the binary in the workspace root target\, not the crate's target\
+$Binary      = Join-Path $ScriptDir "target\release\vpn-client.exe"
 $ConfDir     = Join-Path $env:USERPROFILE ".config\lowkey"
 $ConfFile    = Join-Path $ConfDir "client.conf"
 $SessionFile = Join-Path $ConfDir "session.json"
@@ -246,9 +247,10 @@ Write-Section "Building vpn-client (release)"
 Write-Info "Running: cargo build --release"
 Write-Info "(first build may take a few minutes)"
 
-Push-Location $ClientDir
+# Build from workspace root so the binary lands in <workspace>\target\release\
+Push-Location $ScriptDir
 try {
-    & $CargoExe build --release
+    & $CargoExe build --release -p vpn-client
     if ($LASTEXITCODE -ne 0) {
         throw "cargo build failed with exit code $LASTEXITCODE"
     }
@@ -256,6 +258,11 @@ try {
     Pop-Location
 }
 
+if (-not (Test-Path $Binary)) {
+    Write-Err "Binary not found after build: $Binary"
+    Write-Err "Check cargo output above for errors."
+    exit 1
+}
 Write-Ok "Build complete: $Binary"
 
 if ($Build) {

@@ -46,7 +46,8 @@ section() { echo -e "\n${CYN}═════════════════
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_DIR="$SCRIPT_DIR/vpn-server"
 ENV_FILE="$SCRIPT_DIR/.env"
-BINARY="$SERVER_DIR/target/release/vpn-server"
+# Cargo workspace puts the binary in the workspace root target/, not the crate's target/
+BINARY="$SCRIPT_DIR/target/release/vpn-server"
 PID_FILE="$SCRIPT_DIR/vpn-server.pid"
 
 # ── Parse CLI flags ───────────────────────────────────────────────────────────
@@ -288,20 +289,26 @@ fi   # end: if [[ "$MODE" == "setup" ]]
 # =============================================================================
 section "Building vpn-server (release)"
 
-cd "$SERVER_DIR"
+# Build from workspace root so Cargo resolves the workspace correctly.
+# The binary lands at <workspace>/target/release/vpn-server.
+cd "$SCRIPT_DIR"
 
-# Use the real user's cargo to avoid polluting root's home
-BUILD_CMD="$CARGO_BIN build --release"
+BUILD_CMD="$CARGO_BIN build --release -p vpn-server"
 info "Running: $BUILD_CMD"
 info "(this may take several minutes on the first run)"
 
 # Run as the real user if possible (keeps the build cache in their home)
 if [[ "$REAL_USER" != "root" ]]; then
-    su - "$REAL_USER" -c "cd '$SERVER_DIR' && PATH='$REAL_HOME/.cargo/bin:$PATH' $BUILD_CMD"
+    su - "$REAL_USER" -c "cd '$SCRIPT_DIR' && PATH='$REAL_HOME/.cargo/bin:$PATH' $BUILD_CMD"
 else
     eval "$BUILD_CMD"
 fi
 
+if [[ ! -f "$BINARY" ]]; then
+    error "Binary not found after build: $BINARY"
+    error "Check the cargo output above for compile errors."
+    exit 1
+fi
 ok "Build complete: $BINARY"
 
 # =============================================================================
