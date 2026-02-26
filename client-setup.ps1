@@ -1,37 +1,37 @@
 <#
 .SYNOPSIS
-    Lowkey VPN Client — Full Setup & Connect Script (Windows / PowerShell)
+    Lowkey VPN Client -- Full Setup & Connect Script (Windows / PowerShell)
 
 .DESCRIPTION
     First-run script for the Lowkey VPN client on Windows.
-    1. Checks and installs Rust toolchain (via rustup-init.exe)
-    2. Builds vpn-client.exe in release mode
-    3. Prompts for server address, username, password
-    4. Registers a new account OR logs into an existing one
-    5. Applies a promo / trial code for a free subscription (TRIAL30 by default)
-    6. Shows subscription status
-    7. Connects in SOCKS5 mode (set system proxy to SOCKS5 127.0.0.1:1080)
+      1. Checks / installs Rust toolchain (via rustup-init.exe)
+      2. Builds vpn-client.exe in release mode
+      3. Prompts for server address, username, password
+      4. Registers a new account OR logs into an existing one
+      5. Applies a promo / trial code for a free subscription (TRIAL30)
+      6. Shows subscription status
+      7. Connects via SOCKS5 and sets the Windows system proxy automatically
 
-    On Windows, TUN mode is not available — only SOCKS5 proxy is supported.
-    After connecting, configure your browser / system proxy:
-        Protocol : SOCKS5
-        Host     : 127.0.0.1
-        Port     : 1080
+    On Windows only SOCKS5 mode is available (TUN requires Linux/macOS).
+    After connecting, all apps that honour the system proxy will use the VPN.
 
-.NOTES
-    Run from the repository root with:
-        powershell -ExecutionPolicy Bypass -File .\client-setup.ps1
+.PARAMETER Connect
+    Skip setup prompts and reconnect using saved credentials.
 
-    Flags:
-        -Connect    Reconnect using saved credentials (skip setup prompts)
-        -Build      Rebuild the binary only
-        -Status     Show account and subscription info, then exit
-        -SocksPort  Override the local SOCKS5 listen port (default 1080)
+.PARAMETER Build
+    Rebuild the binary only, do not connect.
+
+.PARAMETER Status
+    Show account and subscription info, then exit.
+
+.PARAMETER SocksPort
+    Override the local SOCKS5 listen port (default 1080).
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\client-setup.ps1
     powershell -ExecutionPolicy Bypass -File .\client-setup.ps1 -Connect
     powershell -ExecutionPolicy Bypass -File .\client-setup.ps1 -Status
+    powershell -ExecutionPolicy Bypass -File .\client-setup.ps1 -Build
 #>
 
 [CmdletBinding()]
@@ -39,45 +39,64 @@ param(
     [switch]$Connect,
     [switch]$Build,
     [switch]$Status,
-    [int]$SocksPort = 0   # 0 = read from saved config or default 1080
+    [int]   $SocksPort = 0
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-function Write-Info  ([string]$msg) { Write-Host "[INFO]  $msg" -ForegroundColor Cyan    }
-function Write-Ok    ([string]$msg) { Write-Host "[ OK ]  $msg" -ForegroundColor Green   }
-function Write-Warn  ([string]$msg) { Write-Host "[WARN]  $msg" -ForegroundColor Yellow  }
-function Write-Err   ([string]$msg) { Write-Host "[ERR ]  $msg" -ForegroundColor Red     }
-function Write-Sec   ([string]$msg) {
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+function Write-Info ([string]$m) { Write-Host "[INFO]  $m" -ForegroundColor Cyan   }
+function Write-Ok   ([string]$m) { Write-Host "[ OK ]  $m" -ForegroundColor Green  }
+function Write-Warn ([string]$m) { Write-Host "[WARN]  $m" -ForegroundColor Yellow }
+function Write-Err  ([string]$m) { Write-Host "[ERR ]  $m" -ForegroundColor Red    }
+
+function Write-Section ([string]$title) {
     Write-Host ""
-    Write-Host "══════════════════════════════════════════" -ForegroundColor Cyan
-    Write-Host "  $msg" -ForegroundColor Cyan
-    Write-Host "══════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host ("=" * 50) -ForegroundColor Cyan
+    Write-Host "  $title" -ForegroundColor Cyan
+    Write-Host ("=" * 50) -ForegroundColor Cyan
 }
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-$ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ClientDir  = Join-Path $ScriptDir "vpn-client"
-$Binary     = Join-Path $ClientDir "target\release\vpn-client.exe"
-$ConfDir    = Join-Path $env:USERPROFILE ".config\lowkey"
-$ConfFile   = Join-Path $ConfDir "client.conf"
-$SessionFile= Join-Path $ConfDir "session.json"
-
-# ── Load / save config ────────────────────────────────────────────────────────
-function Load-Conf {
-    $script:Conf = @{
-        ServerAddr  = ""
-        ApiPort     = 8080
-        UdpPort     = 51820
-        ProxyPort   = 8388
-        SocksPort   = 1080
+function Write-Banner ([string[]]$lines) {
+    $width = ($lines | Measure-Object -Maximum -Property Length).Maximum + 4
+    $bar   = '+' + ('-' * $width) + '+'
+    Write-Host $bar -ForegroundColor Green
+    foreach ($l in $lines) {
+        $pad = $width - $l.Length
+        Write-Host ("| " + $l + (' ' * $pad) + " |") -ForegroundColor Green
     }
+    Write-Host $bar -ForegroundColor Green
+}
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+$ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ClientDir   = Join-Path $ScriptDir "vpn-client"
+$Binary      = Join-Path $ClientDir "target\release\vpn-client.exe"
+$ConfDir     = Join-Path $env:USERPROFILE ".config\lowkey"
+$ConfFile    = Join-Path $ConfDir "client.conf"
+$SessionFile = Join-Path $ConfDir "session.json"
+
+# ---------------------------------------------------------------------------
+# Config load / save
+# ---------------------------------------------------------------------------
+$Conf = [ordered]@{
+    ServerAddr = ""
+    ApiPort    = "8080"
+    UdpPort    = "51820"
+    ProxyPort  = "8388"
+    SocksPort  = "1080"
+}
+
+function Load-Conf {
     if (Test-Path $ConfFile) {
-        Get-Content $ConfFile | ForEach-Object {
-            if ($_ -match '^\s*(\w+)\s*=\s*"?([^"#]*)"?\s*$') {
-                $script:Conf[$Matches[1]] = $Matches[2].Trim()
+        foreach ($line in (Get-Content $ConfFile)) {
+            if ($line -match '^\s*(\w+)\s*=\s*"?([^"#]*)"?\s*$') {
+                $Conf[$Matches[1]] = $Matches[2].Trim()
             }
         }
     }
@@ -86,39 +105,46 @@ function Load-Conf {
 function Save-Conf {
     New-Item -ItemType Directory -Force -Path $ConfDir | Out-Null
     @"
-# Lowkey VPN Client — saved configuration
-ServerAddr=$($script:Conf.ServerAddr)
-ApiPort=$($script:Conf.ApiPort)
-UdpPort=$($script:Conf.UdpPort)
-ProxyPort=$($script:Conf.ProxyPort)
-SocksPort=$($script:Conf.SocksPort)
+# Lowkey VPN Client -- saved configuration
+ServerAddr=$($Conf.ServerAddr)
+ApiPort=$($Conf.ApiPort)
+UdpPort=$($Conf.UdpPort)
+ProxyPort=$($Conf.ProxyPort)
+SocksPort=$($Conf.SocksPort)
 "@ | Set-Content -Encoding UTF8 $ConfFile
 }
 
 Load-Conf
 
-# Override SOCKS port if passed as parameter
-if ($SocksPort -gt 0) { $script:Conf.SocksPort = $SocksPort }
+if ($SocksPort -gt 0) {
+    $Conf.SocksPort = "$SocksPort"
+}
 
-# ── API helpers ───────────────────────────────────────────────────────────────
-
+# ---------------------------------------------------------------------------
+# API helpers (no jq, no curl -- pure PowerShell)
+# ---------------------------------------------------------------------------
 function Invoke-ApiAnon {
     param([string]$Path, [hashtable]$Body)
-    $url = "http://$($script:Conf.ServerAddr):$($script:Conf.ApiPort)$Path"
+    $url = "http://$($Conf.ServerAddr):$($Conf.ApiPort)$Path"
     try {
         return Invoke-RestMethod -Uri $url -Method Post `
             -ContentType 'application/json' `
             -Body ($Body | ConvertTo-Json -Compress)
     } catch {
-        $status = $_.Exception.Response.StatusCode.value__
+        $code   = $_.Exception.Response.StatusCode.value__
         $detail = $_.ErrorDetails.Message
-        throw "HTTP $status — $detail"
+        throw "HTTP $code -- $detail"
     }
 }
 
 function Invoke-ApiAuth {
-    param([string]$Method = 'GET', [string]$Path, [string]$Token, [hashtable]$Body = @{})
-    $url = "http://$($script:Conf.ServerAddr):$($script:Conf.ApiPort)$Path"
+    param(
+        [string]   $Method = 'GET',
+        [string]   $Path,
+        [string]   $Token,
+        [hashtable]$Body = @{}
+    )
+    $url     = "http://$($Conf.ServerAddr):$($Conf.ApiPort)$Path"
     $headers = @{ Authorization = "Bearer $Token" }
     try {
         if ($Method -eq 'GET') {
@@ -130,13 +156,15 @@ function Invoke-ApiAuth {
                 -Body ($Body | ConvertTo-Json -Compress)
         }
     } catch {
-        $status = $_.Exception.Response.StatusCode.value__
+        $code   = $_.Exception.Response.StatusCode.value__
         $detail = $_.ErrorDetails.Message
-        throw "HTTP $status — $detail"
+        throw "HTTP $code -- $detail"
     }
 }
 
-# ── Load existing session token ───────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Session helpers
+# ---------------------------------------------------------------------------
 function Get-SavedToken {
     if (Test-Path $SessionFile) {
         try {
@@ -149,33 +177,61 @@ function Get-SavedToken {
 
 function Save-Session ([string]$Token) {
     New-Item -ItemType Directory -Force -Path $ConfDir | Out-Null
-    @{ token = $Token; server = $script:Conf.ServerAddr; api_port = $script:Conf.ApiPort } |
-        ConvertTo-Json | Set-Content -Encoding UTF8 $SessionFile
+    [pscustomobject]@{
+        token    = $Token
+        server   = $Conf.ServerAddr
+        api_port = [int]$Conf.ApiPort
+    } | ConvertTo-Json | Set-Content -Encoding UTF8 $SessionFile
 }
 
-# =============================================================================
+# ---------------------------------------------------------------------------
+# Registry -- Windows system SOCKS5 proxy
+# ---------------------------------------------------------------------------
+$RegProxy = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+
+function Enable-SystemProxy ([int]$Port) {
+    Set-ItemProperty -Path $RegProxy -Name ProxyServer -Value "socks=127.0.0.1:$Port"
+    Set-ItemProperty -Path $RegProxy -Name ProxyEnable -Value 1
+    Write-Ok "System proxy set: SOCKS5 127.0.0.1:$Port"
+}
+
+function Disable-SystemProxy {
+    Set-ItemProperty -Path $RegProxy -Name ProxyEnable -Value 0
+    Write-Info "System proxy cleared."
+}
+
+# ===========================================================================
 # 1. RUST TOOLCHAIN
-# =============================================================================
-Write-Sec "Rust toolchain"
+# ===========================================================================
+Write-Section "Rust toolchain"
 
 $CargoExe = $null
-$CargoPaths = @(
-    "$env:USERPROFILE\.cargo\bin\cargo.exe",
-    (Get-Command cargo -ErrorAction SilentlyContinue)?.Source
-) | Where-Object { $_ -and (Test-Path $_) }
+$candidates = @("$env:USERPROFILE\.cargo\bin\cargo.exe")
+$fromPath = (Get-Command cargo -ErrorAction SilentlyContinue)
+if ($fromPath) { $candidates += $fromPath.Source }
 
-if ($CargoPaths) {
-    $CargoExe = $CargoPaths[0]
+foreach ($c in $candidates) {
+    if ($c -and (Test-Path $c)) {
+        $CargoExe = $c
+        break
+    }
+}
+
+if ($CargoExe) {
     Write-Ok "Rust found at $CargoExe"
 } else {
-    Write-Info "Rust not found — downloading rustup-init.exe..."
-    $RustupInstaller = Join-Path $env:TEMP "rustup-init.exe"
-    Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile $RustupInstaller -UseBasicParsing
-    Write-Info "Running rustup installer (this takes a few minutes)..."
-    Start-Process -FilePath $RustupInstaller -ArgumentList "-y", "--no-modify-path" -Wait -NoNewWindow
+    Write-Info "Rust not found -- downloading rustup-init.exe ..."
+    $installer = Join-Path $env:TEMP "rustup-init.exe"
+    Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" `
+        -OutFile $installer -UseBasicParsing
+    Write-Info "Running rustup installer (takes a few minutes) ..."
+    Start-Process -FilePath $installer `
+        -ArgumentList "-y", "--no-modify-path" `
+        -Wait -NoNewWindow
     $CargoExe = "$env:USERPROFILE\.cargo\bin\cargo.exe"
     if (-not (Test-Path $CargoExe)) {
-        Write-Err "Rust installation failed. Install manually from https://rustup.rs and re-run."
+        Write-Err "Rust installation failed."
+        Write-Err "Install manually from https://rustup.rs and re-run this script."
         exit 1
     }
     Write-Ok "Rust installed."
@@ -183,17 +239,19 @@ if ($CargoPaths) {
 
 $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
 
-# =============================================================================
+# ===========================================================================
 # 2. BUILD
-# =============================================================================
-Write-Sec "Building vpn-client (release)"
+# ===========================================================================
+Write-Section "Building vpn-client (release)"
 Write-Info "Running: cargo build --release"
 Write-Info "(first build may take a few minutes)"
 
 Push-Location $ClientDir
 try {
     & $CargoExe build --release
-    if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit $LASTEXITCODE)" }
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo build failed with exit code $LASTEXITCODE"
+    }
 } finally {
     Pop-Location
 }
@@ -201,45 +259,47 @@ try {
 Write-Ok "Build complete: $Binary"
 
 if ($Build) {
-    Write-Ok "Build-only mode — done."
+    Write-Ok "Build-only mode -- done."
     exit 0
 }
 
-# =============================================================================
+# ===========================================================================
 # 3. SERVER CONFIGURATION
-# =============================================================================
-Write-Sec "Server configuration"
-
+# ===========================================================================
+Write-Section "Server configuration"
 Write-Host ""
-Write-Host "Enter the VPN server details. Press Enter to keep current values." -ForegroundColor Yellow
+Write-Host "Enter VPN server details. Press Enter to keep current values." `
+    -ForegroundColor Yellow
 Write-Host ""
 
-$curServer = $script:Conf.ServerAddr
+# Server address
+$curServer = $Conf.ServerAddr
 if ($curServer) {
     $inp = Read-Host "  Server IP or hostname [$curServer]"
-    if ($inp) { $script:Conf.ServerAddr = $inp.Trim() }
+    if ($inp.Trim()) { $Conf.ServerAddr = $inp.Trim() }
 } else {
     do {
         $inp = Read-Host "  Server IP or hostname (required)"
-    } while (-not $inp)
-    $script:Conf.ServerAddr = $inp.Trim()
+    } while (-not $inp.Trim())
+    $Conf.ServerAddr = $inp.Trim()
 }
 
-# Check server reachability
-Write-Info "Checking connectivity to $($script:Conf.ServerAddr)..."
+# Reachability check
+Write-Info "Checking $($Conf.ServerAddr):$($Conf.ApiPort) ..."
 $StatusResp = $null
+
 try {
     $StatusResp = Invoke-RestMethod `
-        -Uri "http://$($script:Conf.ServerAddr):$($script:Conf.ApiPort)/api/status" `
+        -Uri "http://$($Conf.ServerAddr):$($Conf.ApiPort)/api/status" `
         -TimeoutSec 5
 } catch {
-    Write-Warn "Could not reach port $($script:Conf.ApiPort). Try a different API port."
-    $inp = Read-Host "  API port [$($script:Conf.ApiPort)]"
-    if ($inp) { $script:Conf.ApiPort = [int]$inp }
+    Write-Warn "Could not reach port $($Conf.ApiPort). Try a different API port."
+    $inp = Read-Host "  API port [$($Conf.ApiPort)]"
+    if ($inp -match '^\d+$') { $Conf.ApiPort = $inp.Trim() }
 
     try {
         $StatusResp = Invoke-RestMethod `
-            -Uri "http://$($script:Conf.ServerAddr):$($script:Conf.ApiPort)/api/status" `
+            -Uri "http://$($Conf.ServerAddr):$($Conf.ApiPort)/api/status" `
             -TimeoutSec 5
     } catch {
         Write-Err "Still cannot reach the server. Check the IP, port and firewall."
@@ -249,67 +309,70 @@ try {
 
 Write-Ok "Server is reachable."
 
-# Use advertised ports from the server status response
-if ($StatusResp.udp_port)   { $script:Conf.UdpPort   = $StatusResp.udp_port   }
-if ($StatusResp.proxy_port) { $script:Conf.ProxyPort  = $StatusResp.proxy_port }
-
-Write-Info "UDP port  : $($script:Conf.UdpPort)"
-Write-Info "Proxy port: $($script:Conf.ProxyPort)"
+# Use advertised ports
+if ($StatusResp.udp_port)   { $Conf.UdpPort   = "$($StatusResp.udp_port)"   }
+if ($StatusResp.proxy_port) { $Conf.ProxyPort  = "$($StatusResp.proxy_port)" }
+Write-Info "UDP port   : $($Conf.UdpPort)"
+Write-Info "Proxy port : $($Conf.ProxyPort)"
 
 Save-Conf
 
-# =============================================================================
-# 4. ACCOUNT — REGISTER OR LOGIN
-# =============================================================================
-Write-Sec "Account setup"
+# ===========================================================================
+# 4. ACCOUNT -- REGISTER OR LOGIN
+# ===========================================================================
+Write-Section "Account setup"
 
-$Token     = $null
-$LoggedIn  = $false
-$SavedToken = Get-SavedToken
+$Token    = $null
+$LoggedIn = $false
 
-if ($SavedToken) {
-    try {
-        $MeResp = Invoke-ApiAuth -Path "/auth/me" -Token $SavedToken
-        Write-Ok "Already logged in as '$($MeResp.login)'."
-        $Token    = $SavedToken
-        $LoggedIn = $true
-    } catch {
-        Write-Warn "Saved session expired — please log in again."
+if (-not $Connect) {
+    $savedToken = Get-SavedToken
+    if ($savedToken) {
+        try {
+            $me = Invoke-ApiAuth -Path "/auth/me" -Token $savedToken
+            Write-Ok "Already logged in as '$($me.login)'."
+            $Token    = $savedToken
+            $LoggedIn = $true
+        } catch {
+            Write-Warn "Saved session expired -- please log in again."
+        }
     }
 }
 
 if (-not $LoggedIn) {
     Write-Host ""
-    $hasAccount = Read-Host "  Do you have an existing account on this server? [y/N]"
+    $hasAcc = Read-Host "  Do you have an existing account on this server? [y/N]"
     Write-Host ""
-    $loginName = Read-Host "  Login (username)"
-    $loginPass = Read-Host "  Password" -AsSecureString
+    $loginName = Read-Host "  Username"
+    $secPass   = Read-Host "  Password" -AsSecureString
     $plainPass = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-                    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($loginPass))
+                    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secPass))
 
-    if ($hasAccount -match '^[Yy]') {
-        Write-Info "Logging in as '$loginName'..."
+    if ($hasAcc -match '^[Yy]') {
+        Write-Info "Logging in as '$loginName' ..."
         try {
-            $AuthResp = Invoke-ApiAnon -Path "/auth/login" `
+            $authResp = Invoke-ApiAnon -Path "/auth/login" `
                 -Body @{ login = $loginName; password = $plainPass }
         } catch {
             Write-Err "Login failed: $_"
             exit 1
         }
+        Write-Ok "Logged in as '$loginName'."
     } else {
-        Write-Info "Creating account '$loginName'..."
+        Write-Info "Creating account '$loginName' ..."
         try {
-            $AuthResp = Invoke-ApiAnon -Path "/auth/register" `
+            $authResp = Invoke-ApiAnon -Path "/auth/register" `
                 -Body @{ login = $loginName; password = $plainPass }
         } catch {
             Write-Err "Registration failed: $_"
             exit 1
         }
+        Write-Ok "Account '$loginName' created."
     }
 
-    $Token = $AuthResp.token
+    $Token = $authResp.token
     if (-not $Token) {
-        Write-Err "No token received from the server."
+        Write-Err "No token received. Check server logs."
         exit 1
     }
 
@@ -317,74 +380,83 @@ if (-not $LoggedIn) {
     Write-Ok "Session saved to $SessionFile"
 }
 
-# =============================================================================
+# ===========================================================================
 # 5. SUBSCRIPTION CHECK & TRIAL ACTIVATION
-# =============================================================================
-Write-Sec "Subscription"
+# ===========================================================================
+Write-Section "Subscription"
 
-$SubResp   = $null
-$SubStatus = "unknown"
+$subStatus = "unknown"
+$subResp   = $null
+
 try {
-    $SubResp   = Invoke-ApiAuth -Path "/subscription/status" -Token $Token
-    $SubStatus = $SubResp.sub_status
-} catch { }
+    $subResp   = Invoke-ApiAuth -Path "/subscription/status" -Token $Token
+    $subStatus = $subResp.sub_status
+} catch {
+    Write-Warn "Could not fetch subscription status: $_"
+}
 
 Write-Host ""
-Write-Host "  Current subscription: " -NoNewline
-Write-Host $SubStatus -ForegroundColor Yellow
-if ($SubResp -and $SubResp.sub_expires_at) {
-    Write-Host "  Expires: $($SubResp.sub_expires_at)"
+Write-Host "  Subscription : " -NoNewline
+Write-Host $subStatus -ForegroundColor Yellow
+if ($subResp -and $subResp.sub_expires_at) {
+    Write-Host "  Expires      : $($subResp.sub_expires_at)"
 }
 Write-Host ""
 
-if ($SubStatus -ne "active") {
+if ($subStatus -ne "active") {
     Write-Host "  No active subscription." -ForegroundColor Yellow
     Write-Host ""
     Write-Host "  Options:" -ForegroundColor Cyan
-    Write-Host "    1) Apply a promo / trial code" -ForegroundColor Green
-    Write-Host "    2) View plans and buy a subscription" -ForegroundColor Green
-    Write-Host "    3) Skip (the server will reject the VPN connection)" -ForegroundColor Green
+    Write-Host "    1) Apply a promo / trial code  (TRIAL30 = 30 free days)" `
+        -ForegroundColor Green
+    Write-Host "    2) View available plans and buy" -ForegroundColor Green
+    Write-Host "    3) Skip (server will reject the VPN connection)" `
+        -ForegroundColor Green
     Write-Host ""
     $choice = Read-Host "  Choice [1]"
     if (-not $choice) { $choice = "1" }
 
-    switch ($choice) {
+    switch ($choice.Trim()) {
         "1" {
             Write-Host ""
-            Write-Host "  If the server admin ran server-setup.sh, try: " -NoNewline
+            Write-Host "  If the server admin ran server-setup.sh the code is: " `
+                -NoNewline
             Write-Host "TRIAL30" -ForegroundColor Green
             $promoCode = Read-Host "  Enter promo code [TRIAL30]"
-            if (-not $promoCode) { $promoCode = "TRIAL30" }
+            if (-not $promoCode.Trim()) { $promoCode = "TRIAL30" }
 
             try {
-                $PromoResp = Invoke-ApiAuth -Method Post -Path "/promo/apply" `
-                    -Token $Token -Body @{ code = $promoCode }
-                Write-Ok "Promo applied: $($PromoResp.message)"
-                if ($PromoResp.sub_expires_at) {
-                    Write-Info "Subscription active until: $($PromoResp.sub_expires_at)"
+                $pr = Invoke-ApiAuth -Method Post -Path "/promo/apply" `
+                    -Token $Token -Body @{ code = $promoCode.Trim() }
+                Write-Ok "Promo applied: $($pr.message)"
+                if ($pr.sub_expires_at) {
+                    Write-Info "Active until: $($pr.sub_expires_at)"
                 }
             } catch {
-                Write-Warn "Could not apply promo code: $_"
+                Write-Warn "Could not apply promo: $_"
             }
         }
         "2" {
             try {
-                $Plans = Invoke-RestMethod `
-                    -Uri "http://$($script:Conf.ServerAddr):$($script:Conf.ApiPort)/subscription/plans"
+                $plans = Invoke-RestMethod `
+                    -Uri "http://$($Conf.ServerAddr):$($Conf.ApiPort)/subscription/plans"
                 Write-Host ""
                 Write-Host "  Available plans:" -ForegroundColor Cyan
-                foreach ($p in $Plans) {
-                    Write-Host ("  {0,-10} {1,-35} {2} RUB / {3} days" -f `
+                foreach ($p in $plans) {
+                    Write-Host ("    {0,-10}  {1,-36}  {2} RUB / {3} days" -f `
                         $p.id, $p.name, $p.price_rub, $p.duration_days)
                 }
                 Write-Host ""
-            } catch { Write-Warn "Could not fetch plans." }
+            } catch {
+                Write-Warn "Could not fetch plans."
+            }
 
             $planId = Read-Host "  Plan ID to buy [standard]"
-            if (-not $planId) { $planId = "standard" }
+            if (-not $planId.Trim()) { $planId = "standard" }
+
             try {
-                $BuyResp = Invoke-ApiAuth -Method Post -Path "/subscription/buy" `
-                    -Token $Token -Body @{ plan_id = $planId }
+                $null = Invoke-ApiAuth -Method Post -Path "/subscription/buy" `
+                    -Token $Token -Body @{ plan_id = $planId.Trim() }
                 Write-Ok "Subscription activated!"
             } catch {
                 Write-Warn "Purchase failed (balance too low?): $_"
@@ -396,27 +468,35 @@ if ($SubStatus -ne "active") {
     }
 }
 
-# Refresh subscription status
+# Refresh
 try {
-    $SubResp   = Invoke-ApiAuth -Path "/subscription/status" -Token $Token
-    $SubStatus = $SubResp.sub_status
+    $subResp   = Invoke-ApiAuth -Path "/subscription/status" -Token $Token
+    $subStatus = $subResp.sub_status
 } catch { }
 
-$speedLabel = if ($SubResp -and $SubResp.sub_speed_mbps -eq 0) { "unlimited" } `
-              elseif ($SubResp) { "$($SubResp.sub_speed_mbps) Mbit/s" } `
-              else { "unknown" }
+$speedLabel = "unknown"
+if ($subResp) {
+    if ($subResp.sub_speed_mbps -eq 0) {
+        $speedLabel = "unlimited"
+    } else {
+        $speedLabel = "$($subResp.sub_speed_mbps) Mbit/s"
+    }
+}
+
+$expiryLine = ""
+if ($subResp -and $subResp.sub_expires_at) {
+    $expiryLine = "Expires      : $($subResp.sub_expires_at)"
+}
 
 Write-Host ""
-Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║               Account Summary                        ║" -ForegroundColor Green
-Write-Host "╠══════════════════════════════════════════════════════╣" -ForegroundColor Green
-Write-Host "║  Server       : $($script:Conf.ServerAddr):$($script:Conf.ApiPort)"
-Write-Host "║  Subscription : $SubStatus"
-if ($SubResp -and $SubResp.sub_expires_at) {
-    Write-Host "║  Expires      : $($SubResp.sub_expires_at)"
-}
-Write-Host "║  Speed limit  : $speedLabel"
-Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Green
+Write-Banner @(
+    "Account Summary",
+    "",
+    "Server       : $($Conf.ServerAddr):$($Conf.ApiPort)",
+    "Subscription : $subStatus",
+    $(if ($expiryLine) { $expiryLine } else { "Expires      : -" }),
+    "Speed limit  : $speedLabel"
+)
 Write-Host ""
 
 if ($Status) {
@@ -424,62 +504,51 @@ if ($Status) {
     exit 0
 }
 
-# =============================================================================
+# ===========================================================================
 # 6. CONNECT (SOCKS5)
-# =============================================================================
-Write-Sec "Connecting (SOCKS5)"
+# ===========================================================================
+Write-Section "Connecting (SOCKS5)"
 
-if ($SubStatus -ne "active") {
+if ($subStatus -ne "active") {
     Write-Warn "Subscription is not active. Server will likely reject the connection."
     $force = Read-Host "  Continue anyway? [y/N]"
-    if ($force -notmatch '^[Yy]') { exit 0 }
+    if ($force -notmatch '^[Yy]') {
+        exit 0
+    }
 }
 
-$socksListenPort = $script:Conf.SocksPort
-$inp = Read-Host "  Local SOCKS5 port [$socksListenPort]"
+$listenPort = [int]$Conf.SocksPort
+$inp = Read-Host "  Local SOCKS5 port [$listenPort]"
 if ($inp -match '^\d+$') {
-    $socksListenPort = [int]$inp
-    $script:Conf.SocksPort = $socksListenPort
+    $listenPort     = [int]$inp
+    $Conf.SocksPort = "$listenPort"
     Save-Conf
 }
 
 Write-Host ""
-Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║         Lowkey VPN — SOCKS5 Mode                     ║" -ForegroundColor Green
-Write-Host "╠══════════════════════════════════════════════════════╣" -ForegroundColor Green
-Write-Host "║  Server      : $($script:Conf.ServerAddr)"
-Write-Host "║  Proxy port  : $($script:Conf.ProxyPort)  →  SOCKS5 127.0.0.1:$socksListenPort"
-Write-Host "╠══════════════════════════════════════════════════════╣" -ForegroundColor Green
-Write-Host "║  Set system proxy:                                    ║" -ForegroundColor Green
-Write-Host "║    Settings → Network → Proxy → Manual               ║" -ForegroundColor Green
-Write-Host "║    SOCKS Host: 127.0.0.1   Port: $socksListenPort" -ForegroundColor Yellow
-Write-Host "╠══════════════════════════════════════════════════════╣" -ForegroundColor Green
-Write-Host "║  Press Ctrl-C to disconnect.                         ║" -ForegroundColor Green
-Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Green
+Write-Banner @(
+    "Lowkey VPN -- SOCKS5 Mode",
+    "",
+    "Server      : $($Conf.ServerAddr)",
+    "VPN proxy   : $($Conf.ServerAddr):$($Conf.ProxyPort)",
+    "Local SOCKS5: 127.0.0.1:$listenPort",
+    "",
+    "Windows Settings -> Network -> Proxy -> Manual",
+    "SOCKS Host: 127.0.0.1   Port: $listenPort",
+    "",
+    "Press Ctrl-C to disconnect."
+)
 Write-Host ""
 
-# Set the Windows system SOCKS5 proxy automatically
-$regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-$proxyStr = "socks=127.0.0.1:$socksListenPort"
-Set-ItemProperty -Path $regPath -Name ProxyServer -Value $proxyStr
-Set-ItemProperty -Path $regPath -Name ProxyEnable  -Value 1
-Write-Ok "System proxy set to SOCKS5 127.0.0.1:$socksListenPort"
-Write-Info "(will be cleared when you close this window or Ctrl-C)"
-
-# Restore proxy on exit
-$restoreProxy = {
-    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-    Set-ItemProperty -Path $regPath -Name ProxyEnable -Value 0
-    Write-Host "`n[INFO]  System proxy cleared." -ForegroundColor Cyan
-}
+Enable-SystemProxy -Port $listenPort
 
 try {
     & $Binary connect `
-        --server       $script:Conf.ServerAddr `
-        --api-port     $script:Conf.ApiPort `
-        --proxy-port   $script:Conf.ProxyPort `
-        --mode         socks5 `
-        --socks-port   $socksListenPort
+        --server     $Conf.ServerAddr `
+        --api-port   $Conf.ApiPort `
+        --proxy-port $Conf.ProxyPort `
+        --mode       socks5 `
+        --socks-port $listenPort
 } finally {
-    & $restoreProxy
+    Disable-SystemProxy
 }

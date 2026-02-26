@@ -1,23 +1,23 @@
 <#
 .SYNOPSIS
-    Lowkey VPN Client — Launch Script (Windows / PowerShell)
+    Lowkey VPN Client -- Launch Script (Windows / PowerShell)
 
 .DESCRIPTION
-    Minimal connect script for the Lowkey VPN client on Windows.
-    Loads saved config and session from ~/.config/lowkey/,
-    then starts vpn-client.exe in SOCKS5 mode.
+    Minimal connect script. Loads saved config and session from
+    %USERPROFILE%\.config\lowkey\ and starts vpn-client.exe in SOCKS5 mode.
+    Run client-setup.ps1 first to register and save config.
 
-    Run client-setup.ps1 first to register, get a subscription and save config.
+.PARAMETER SocksPort
+    Override the local SOCKS5 listen port (default: value from saved config).
 
-.NOTES
-    Run from the repository root with:
-        powershell -ExecutionPolicy Bypass -File .\client-run.ps1
+.PARAMETER Background
+    Run the client as a background PowerShell Job.
 
-    Flags:
-        -SocksPort <int>   Override local SOCKS5 port (default: saved config)
-        -Background        Run in a background job (detached)
-        -Stop              Stop a running background job
-        -Status            Print current server + proxy info and exit
+.PARAMETER Stop
+    Stop a running background job and clear the system proxy.
+
+.PARAMETER Status
+    Print config / session / job info and exit.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\client-run.ps1
@@ -37,48 +37,71 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 function Write-Info ([string]$m) { Write-Host "[INFO]  $m" -ForegroundColor Cyan   }
 function Write-Ok   ([string]$m) { Write-Host "[ OK ]  $m" -ForegroundColor Green  }
 function Write-Warn ([string]$m) { Write-Host "[WARN]  $m" -ForegroundColor Yellow }
 function Write-Err  ([string]$m) { Write-Host "[ERR ]  $m" -ForegroundColor Red    }
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-$ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Binary      = Join-Path $ScriptDir "vpn-client\target\release\vpn-client.exe"
-$ConfDir     = Join-Path $env:USERPROFILE ".config\lowkey"
-$ConfFile    = Join-Path $ConfDir "client.conf"
-$SessionFile = Join-Path $ConfDir "session.json"
-$JobFile     = Join-Path $ScriptDir "vpn-client.job"   # stores background job ID
-$LogFile     = Join-Path $ScriptDir "vpn-client.log"
+function Write-Banner ([string[]]$lines) {
+    $width = ($lines | Measure-Object -Maximum -Property Length).Maximum + 4
+    $bar   = '+' + ('-' * $width) + '+'
+    Write-Host $bar -ForegroundColor Green
+    foreach ($l in $lines) {
+        $pad = $width - $l.Length
+        Write-Host ("| " + $l + (' ' * $pad) + " |") -ForegroundColor Green
+    }
+    Write-Host $bar -ForegroundColor Green
+}
 
-# ── Load config ───────────────────────────────────────────────────────────────
-$Conf = @{
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+$ScriptDir    = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Binary       = Join-Path $ScriptDir "vpn-client\target\release\vpn-client.exe"
+$ConfDir      = Join-Path $env:USERPROFILE ".config\lowkey"
+$ConfFile     = Join-Path $ConfDir "client.conf"
+$SessionFile  = Join-Path $ConfDir "session.json"
+$JobFile      = Join-Path $ScriptDir "vpn-client.job"
+$LogFile      = Join-Path $ScriptDir "vpn-client.log"
+
+# ---------------------------------------------------------------------------
+# Load config
+# ---------------------------------------------------------------------------
+$Conf = [ordered]@{
     ServerAddr = ""
-    ApiPort    = 8080
-    UdpPort    = 51820
-    ProxyPort  = 8388
-    SocksPort  = 1080
+    ApiPort    = "8080"
+    UdpPort    = "51820"
+    ProxyPort  = "8388"
+    SocksPort  = "1080"
 }
 
 if (Test-Path $ConfFile) {
-    Get-Content $ConfFile | ForEach-Object {
-        if ($_ -match '^\s*(\w+)\s*=\s*"?([^"#]*)"?\s*$') {
+    foreach ($line in (Get-Content $ConfFile)) {
+        if ($line -match '^\s*(\w+)\s*=\s*"?([^"#]*)"?\s*$') {
             $Conf[$Matches[1]] = $Matches[2].Trim()
         }
     }
 } else {
-    Write-Err "Config not found at $ConfFile"
+    Write-Err "Config not found: $ConfFile"
     Write-Err "Run client-setup.ps1 first."
     exit 1
 }
 
-if ($SocksPort -gt 0) { $Conf.SocksPort = $SocksPort }
+if ($SocksPort -gt 0) {
+    $Conf.SocksPort = "$SocksPort"
+}
 
-# ── Validate prerequisites ────────────────────────────────────────────────────
+$listenPort = [int]$Conf.SocksPort
+
+# ---------------------------------------------------------------------------
+# Validate prerequisites
+# ---------------------------------------------------------------------------
 if (-not (Test-Path $Binary)) {
     Write-Err "Binary not found: $Binary"
-    Write-Err "Run client-setup.ps1 -Build first."
+    Write-Err "Run: powershell -ExecutionPolicy Bypass -File .\client-setup.ps1 -Build"
     exit 1
 }
 
@@ -93,13 +116,15 @@ if (-not $Conf.ServerAddr) {
     exit 1
 }
 
-# ── Registry helpers for system proxy ────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Registry helpers -- Windows system SOCKS5 proxy
+# ---------------------------------------------------------------------------
 $RegProxy = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 
 function Enable-SystemProxy ([int]$Port) {
     Set-ItemProperty -Path $RegProxy -Name ProxyServer -Value "socks=127.0.0.1:$Port"
-    Set-ItemProperty -Path $RegProxy -Name ProxyEnable  -Value 1
-    Write-Ok "System SOCKS5 proxy → 127.0.0.1:$Port"
+    Set-ItemProperty -Path $RegProxy -Name ProxyEnable -Value 1
+    Write-Ok "System proxy set: SOCKS5 127.0.0.1:$Port"
 }
 
 function Disable-SystemProxy {
@@ -107,15 +132,17 @@ function Disable-SystemProxy {
     Write-Info "System proxy cleared."
 }
 
-# ── Stop mode ─────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# --Stop
+# ---------------------------------------------------------------------------
 if ($Stop) {
     if (Test-Path $JobFile) {
-        $jobId = Get-Content $JobFile -Raw | ForEach-Object { $_.Trim() }
-        $job   = Get-Job -Id $jobId -ErrorAction SilentlyContinue
+        $jobId = (Get-Content $JobFile -Raw).Trim()
+        $job   = Get-Job -Id ([int]$jobId) -ErrorAction SilentlyContinue
         if ($job) {
-            Stop-Job  -Id $jobId
-            Remove-Job -Id $jobId
-            Write-Ok "Background VPN job ($jobId) stopped."
+            Stop-Job  -Id ([int]$jobId)
+            Remove-Job -Id ([int]$jobId)
+            Write-Ok "Background VPN job $jobId stopped."
         } else {
             Write-Warn "Job $jobId not found (may have already exited)."
         }
@@ -127,93 +154,110 @@ if ($Stop) {
     exit 0
 }
 
-# ── Status mode ───────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# --Status
+# ---------------------------------------------------------------------------
 if ($Status) {
-    Write-Host ""
-    Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Green
-    Write-Host "║          Lowkey VPN Client — Status              ║" -ForegroundColor Green
-    Write-Host "╠══════════════════════════════════════════════════╣" -ForegroundColor Green
-    Write-Host "║  Server     : $($Conf.ServerAddr):$($Conf.ApiPort)"
-    Write-Host "║  Proxy port : $($Conf.ProxyPort)"
-    Write-Host "║  SOCKS5     : 127.0.0.1:$($Conf.SocksPort)"
-    Write-Host "║  Binary     : $Binary"
-    Write-Host "║  Session    : $(if (Test-Path $SessionFile) { 'found' } else { 'MISSING' })"
-
+    $jobInfo = "none"
     if (Test-Path $JobFile) {
-        $jobId = (Get-Content $JobFile -Raw).Trim()
-        $job   = Get-Job -Id $jobId -ErrorAction SilentlyContinue
-        $state = if ($job) { $job.State } else { "not running" }
-        Write-Host "║  Background job: $jobId ($state)"
-    } else {
-        Write-Host "║  Background job: none"
+        $jobId  = (Get-Content $JobFile -Raw).Trim()
+        $job    = Get-Job -Id ([int]$jobId) -ErrorAction SilentlyContinue
+        $state  = if ($job) { $job.State } else { "not running" }
+        $jobInfo = "Job $jobId ($state)"
     }
-    Write-Host "╚══════════════════════════════════════════════════╝" -ForegroundColor Green
-    Write-Host ""
+    $sessionOk = if (Test-Path $SessionFile) { "found" } else { "MISSING" }
+
+    Write-Banner @(
+        "Lowkey VPN Client -- Status",
+        "",
+        "Server      : $($Conf.ServerAddr):$($Conf.ApiPort)",
+        "Proxy port  : $($Conf.ProxyPort)",
+        "SOCKS5      : 127.0.0.1:$listenPort",
+        "Binary      : $Binary",
+        "Session     : $sessionOk",
+        "Background  : $jobInfo"
+    )
     exit 0
 }
 
-# ── Print banner ──────────────────────────────────────────────────────────────
-Write-Host ""
-Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║           Lowkey VPN Client (SOCKS5)                 ║" -ForegroundColor Green
-Write-Host "╠══════════════════════════════════════════════════════╣" -ForegroundColor Green
-Write-Host "║  Server       : $($Conf.ServerAddr)"
-Write-Host "║  VPN proxy    : $($Conf.ServerAddr):$($Conf.ProxyPort)"
-Write-Host "║  Local SOCKS5 : 127.0.0.1:$($Conf.SocksPort)"
-Write-Host "╠══════════════════════════════════════════════════════╣" -ForegroundColor Green
-
+# ---------------------------------------------------------------------------
+# Banner
+# ---------------------------------------------------------------------------
 if ($Background) {
-Write-Host "║  Mode: background (logs → vpn-client.log)            ║" -ForegroundColor Green
-Write-Host "║  Stop: .\client-run.ps1 -Stop                        ║" -ForegroundColor Green
+    Write-Banner @(
+        "Lowkey VPN Client (SOCKS5) -- Background",
+        "",
+        "Server      : $($Conf.ServerAddr)",
+        "VPN proxy   : $($Conf.ServerAddr):$($Conf.ProxyPort)",
+        "Local SOCKS5: 127.0.0.1:$listenPort",
+        "",
+        "Logs : Get-Content '$LogFile' -Wait",
+        "Stop : .\client-run.ps1 -Stop"
+    )
 } else {
-Write-Host "║  Set system proxy → SOCKS5 127.0.0.1:$($Conf.SocksPort)         " -ForegroundColor Yellow
-Write-Host "║  Press Ctrl-C to disconnect.                         ║" -ForegroundColor Green
+    Write-Banner @(
+        "Lowkey VPN Client (SOCKS5)",
+        "",
+        "Server      : $($Conf.ServerAddr)",
+        "VPN proxy   : $($Conf.ServerAddr):$($Conf.ProxyPort)",
+        "Local SOCKS5: 127.0.0.1:$listenPort",
+        "",
+        "Set system proxy -> SOCKS5 127.0.0.1:$listenPort",
+        "Press Ctrl-C to disconnect."
+    )
 }
-
-Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""
 
-# Build argument list for the binary
-$Args = @(
+# ---------------------------------------------------------------------------
+# Build argument list
+# ---------------------------------------------------------------------------
+$BinaryArgs = @(
     "connect",
     "--server",     $Conf.ServerAddr,
     "--api-port",   $Conf.ApiPort,
     "--proxy-port", $Conf.ProxyPort,
     "--mode",       "socks5",
-    "--socks-port", $Conf.SocksPort
+    "--socks-port", "$listenPort"
 )
 
-# ── Background mode ───────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Background mode
+# ---------------------------------------------------------------------------
 if ($Background) {
     # Stop any previous background job
     if (Test-Path $JobFile) {
-        $oldId = (Get-Content $JobFile -Raw).Trim()
-        $oldJob = Get-Job -Id $oldId -ErrorAction SilentlyContinue
-        if ($oldJob) { Stop-Job $oldId; Remove-Job $oldId }
+        $oldId  = (Get-Content $JobFile -Raw).Trim()
+        $oldJob = Get-Job -Id ([int]$oldId) -ErrorAction SilentlyContinue
+        if ($oldJob) {
+            Stop-Job  -Id ([int]$oldId)
+            Remove-Job -Id ([int]$oldId)
+        }
         Remove-Item $JobFile -Force
     }
 
-    $binaryLocal = $Binary
-    $argsLocal   = $Args
-    $logLocal    = $LogFile
+    $binPath   = $Binary
+    $binArgs   = $BinaryArgs
+    $logPath   = $LogFile
 
     $job = Start-Job -ScriptBlock {
-        & $using:binaryLocal $using:argsLocal *>> $using:logLocal
+        & $using:binPath $using:binArgs 2>&1 | Tee-Object -FilePath $using:logPath -Append
     }
 
-    $job.Id | Set-Content $JobFile
-    Enable-SystemProxy -Port $Conf.SocksPort
-    Write-Ok "VPN started in background (Job ID $($job.Id))."
+    "$($job.Id)" | Set-Content $JobFile
+    Enable-SystemProxy -Port $listenPort
+    Write-Ok "VPN started as background Job $($job.Id)."
     Write-Info "Logs : Get-Content '$LogFile' -Wait"
     Write-Info "Stop : .\client-run.ps1 -Stop"
     exit 0
 }
 
-# ── Foreground mode ───────────────────────────────────────────────────────────
-Enable-SystemProxy -Port $Conf.SocksPort
+# ---------------------------------------------------------------------------
+# Foreground mode
+# ---------------------------------------------------------------------------
+Enable-SystemProxy -Port $listenPort
 
 try {
-    & $Binary $Args
+    & $Binary $BinaryArgs
 } finally {
     Disable-SystemProxy
 }
