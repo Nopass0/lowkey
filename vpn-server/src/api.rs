@@ -33,7 +33,7 @@ use chrono::Utc;
 use tracing::info;
 use vpn_common::{
     from_hex, to_hex, LimitRequest, PeerInfo, RegisterRequest, RegisterResponse, StatusResponse,
-    VPN_SUBNET_CIDR,
+    VPN_SUBNET_CIDR, VPN_SUBNET_OCTETS,
 };
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -76,7 +76,10 @@ pub async fn api_list_peers(State(s): State<Shared>) -> Json<Vec<PeerInfo>> {
         let p = entry.value();
         out.push(PeerInfo {
             vpn_ip: p.vpn_ip.to_string(),
-            endpoint: p.endpoint.read().await
+            endpoint: p
+                .endpoint
+                .read()
+                .await
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "pending".into()),
             bytes_in: p.bytes_in(),
@@ -196,7 +199,12 @@ async fn assign_new_ip(s: &Shared) -> Result<Ipv4Addr, (StatusCode, String)> {
         *next = if *next >= 254 { 2 } else { *next + 1 };
         o
     };
-    Ok(Ipv4Addr::new(10, 0, 0, octet))
+    Ok(Ipv4Addr::new(
+        VPN_SUBNET_OCTETS[0],
+        VPN_SUBNET_OCTETS[1],
+        VPN_SUBNET_OCTETS[2],
+        octet,
+    ))
 }
 
 // ── Peer management ───────────────────────────────────────────────────────────
@@ -209,7 +217,8 @@ pub async fn api_remove_peer(
     State(s): State<Shared>,
     Path(ip): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let vpn_ip: Ipv4Addr = ip.parse()
+    let vpn_ip: Ipv4Addr = ip
+        .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid IP".into()))?;
 
     match s.peers.remove(&vpn_ip) {
@@ -233,9 +242,12 @@ pub async fn api_set_limit(
     Path(ip): Path<String>,
     Json(req): Json<LimitRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let vpn_ip: Ipv4Addr = ip.parse()
+    let vpn_ip: Ipv4Addr = ip
+        .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid IP".into()))?;
-    let peer = s.peers.get(&vpn_ip)
+    let peer = s
+        .peers
+        .get(&vpn_ip)
         .ok_or((StatusCode::NOT_FOUND, "Peer not found".into()))?;
 
     // Convert Mbit/s → bytes/s and store atomically
