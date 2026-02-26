@@ -235,12 +235,19 @@ function Enable-SystemProxy ([int]$Port) {
 
 function Test-SocksProxy ([int]$Port) {
     try {
-        $proxy = New-Object System.Net.WebProxy("socks5://127.0.0.1:$Port")
-        $wc = New-Object System.Net.WebClient
-        $wc.Proxy = $proxy
-        $wc.Encoding = [System.Text.Encoding]::UTF8
-        $null = $wc.DownloadString("https://api.ipify.org")
-        Write-Ok "SOCKS5 tunnel check passed (HTTPS over proxy works)."
+        $directIp = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing -TimeoutSec 8).Content.Trim()
+        $proxyIp  = (curl.exe --silent --show-error --max-time 12 --socks5-hostname "127.0.0.1:$Port" https://api.ipify.org).Trim()
+
+        if (-not $proxyIp) {
+            throw "Empty response via SOCKS5 proxy"
+        }
+
+        if ($directIp -eq $proxyIp) {
+            Write-Warn "SOCKS5 check: public IP did not change ($proxyIp). Traffic may bypass VPN."
+            return $false
+        }
+
+        Write-Ok "SOCKS5 check passed. Direct IP: $directIp ; VPN IP: $proxyIp"
         return $true
     } catch {
         Write-Warn "SOCKS5 tunnel check failed: $($_.Exception.Message)"
@@ -646,8 +653,6 @@ Write-Banner @(
 Write-Host ""
 
 Enable-SystemProxy -Port $listenPort
-$null = Test-SocksProxy -Port $listenPort
-
 try {
     & $Binary connect `
         --server     $Conf.ServerAddr `

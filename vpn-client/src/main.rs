@@ -631,6 +631,39 @@ async fn udp_to_tun(
 /// # Usage
 /// Set your system proxy to `SOCKS5 127.0.0.1:1080` (or the configured port)
 /// and all TCP traffic will be tunnelled.
+
+/// Check whether public IP changes when using a local SOCKS5 proxy.
+///
+/// Returns `(direct_ip, proxy_ip)` on success.
+async fn verify_proxy_ip_change(socks_port: u16) -> Result<(String, String)> {
+    let direct_client = api_http_client()?;
+    let direct_ip = direct_client
+        .get("https://api.ipify.org")
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?
+        .trim()
+        .to_string();
+
+    let proxy_url = format!("socks5h://127.0.0.1:{socks_port}");
+    let proxied_client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(&proxy_url)?)
+        .build()?;
+    let proxy_ip = proxied_client
+        .get("https://api.ipify.org")
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?
+        .trim()
+        .to_string();
+
+    Ok((direct_ip, proxy_ip))
+}
+
 async fn run_socks5_mode(
     server: &str,
     proxy_port: u16,
@@ -651,6 +684,37 @@ async fn run_socks5_mode(
 
     let sb = my_secret.to_bytes();
     let sa = format!("{server}:{proxy_port}");
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(12),
+            verify_proxy_ip_change(socks_port),
+        )
+        .await
+        {
+            Ok(Ok((direct_ip, proxy_ip))) => {
+                if direct_ip == proxy_ip {
+                    tracing::warn!(
+                        "Proxy IP check: public IP did not change ({}). Proxy may be bypassed.",
+                        proxy_ip
+                    );
+                } else {
+                    tracing::info!(
+                        "Proxy IP check: direct={} proxied={} (VPN egress active)",
+                        direct_ip,
+                        proxy_ip
+                    );
+                }
+            }
+            Ok(Err(err)) => {
+                tracing::warn!("Proxy IP check failed: {err}");
+            }
+            Err(_) => {
+                tracing::warn!("Proxy IP check timed out");
+            }
+        }
+    });
+
     let ctrl_c = signal::ctrl_c();
     tokio::pin!(ctrl_c);
 
