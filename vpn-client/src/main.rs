@@ -364,7 +364,7 @@ async fn handle_sub(cmd: SubCmd) -> Result<()> {
             let s = load_session();
             let srv = server.or(s.server).context("--server required")?;
             // Plans endpoint is public — no token needed
-            let resp: serde_json::Value = reqwest::Client::new()
+            let resp: serde_json::Value = api_http_client()?
                 .get(format!("http://{}:{}/subscription/plans", srv, api_port))
                 .send()
                 .await?
@@ -915,6 +915,16 @@ fn restore_routing(server: &str, gw: &str, split: bool) {
 
 // ── HTTP API helpers ──────────────────────────────────────────────────────────
 
+/// Build an HTTP client for API requests that ignores proxy-related env vars.
+///
+/// The Windows setup scripts set `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY` to
+/// `socks5h://127.0.0.1:<port>` after the local tunnel comes up. Reqwest does
+/// not support every proxy URI variant from environment variables, so API calls
+/// such as `/api/peers/register` must bypass env proxy auto-detection.
+fn api_http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder().no_proxy().build()?)
+}
+
 /// POST to an unauthenticated endpoint (no Bearer token).
 ///
 /// Used for `/auth/register` and `/auth/login`.
@@ -924,7 +934,7 @@ async fn api_anon(
     path: &str,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    Ok(reqwest::Client::new()
+    Ok(api_http_client()?
         .post(format!("http://{}:{}{}", server, port, path))
         .json(body)
         .send()
@@ -942,7 +952,7 @@ async fn api_post(
     tok: &str,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    Ok(reqwest::Client::new()
+    Ok(api_http_client()?
         .post(format!("http://{}:{}{}", server, port, path))
         .bearer_auth(tok)
         .json(body)
@@ -955,7 +965,7 @@ async fn api_post(
 
 /// GET an authenticated endpoint with a Bearer token.
 async fn api_get(server: &str, port: u16, path: &str, tok: &str) -> Result<serde_json::Value> {
-    Ok(reqwest::Client::new()
+    Ok(api_http_client()?
         .get(format!("http://{}:{}{}", server, port, path))
         .bearer_auth(tok)
         .send()
