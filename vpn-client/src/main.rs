@@ -408,7 +408,7 @@ async fn run_tun_mode(
     let mut cfg = tun::Configuration::default();
     cfg.address(vpn_ip.to_string().as_str())
        .netmask(vpn_common::VPN_NETMASK)
-       .destination("10.0.0.1")
+       .destination(vpn_common::VPN_SERVER_IP)
        .up();
     cfg.platform(|c| { c.packet_information(false); });
     let dev = tun::create_as_async(&cfg).context("TUN failed — run as root")?;
@@ -742,13 +742,13 @@ fn get_gw() -> Result<String> {
 fn setup_routing(server: &str, gw: &str, split: bool) -> Result<()> {
     use std::process::Command;
     if split {
-        Command::new("ip").args(["route", "add", "10.0.0.0/24", "dev", "tun0"]).output()?;
+        Command::new("ip").args(["route", "add", vpn_common::VPN_SUBNET_CIDR, "dev", "tun0"]).output()?;
         return Ok(());
     }
     // Full-tunnel: route server IP via original gateway to avoid loop
     let _ = Command::new("ip").args(["route", "del", &format!("{server}/32")]).output();
     Command::new("ip").args(["route", "add", &format!("{server}/32"), "via", gw]).output()?;
-    Command::new("ip").args(["route", "replace", "default", "via", "10.0.0.1", "dev", "tun0"]).output()?;
+    Command::new("ip").args(["route", "replace", "default", "via", vpn_common::VPN_SERVER_IP, "dev", "tun0"]).output()?;
     Ok(())
 }
 
@@ -757,7 +757,7 @@ fn setup_routing(server: &str, gw: &str, split: bool) -> Result<()> {
 fn restore_routing(server: &str, gw: &str, split: bool) {
     use std::process::Command;
     if split {
-        let _ = Command::new("ip").args(["route", "del", "10.0.0.0/24", "dev", "tun0"]).output();
+        let _ = Command::new("ip").args(["route", "del", vpn_common::VPN_SUBNET_CIDR, "dev", "tun0"]).output();
         return;
     }
     let _ = Command::new("ip").args(["route", "del", &format!("{server}/32")]).output();

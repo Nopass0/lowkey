@@ -37,23 +37,26 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 use hkdf::Hkdf;
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 
 // ── Network constants ─────────────────────────────────────────────────────────
 
 /// VPN server-side TUN IP (gateway for all clients).
-pub const VPN_SERVER_IP: &str = "10.0.0.1";
+pub const VPN_SERVER_IP: &str = "10.66.0.1";
 
 /// Netmask for the /24 VPN subnet.
 pub const VPN_NETMASK: &str = "255.255.255.0";
 
 /// Base of the VPN subnet (without CIDR suffix).
-pub const VPN_SUBNET: &str = "10.0.0.0";
+pub const VPN_SUBNET: &str = "10.66.0.0";
 
 /// VPN subnet in CIDR notation — used for iptables rules.
-pub const VPN_SUBNET_CIDR: &str = "10.0.0.0/24";
+pub const VPN_SUBNET_CIDR: &str = "10.66.0.0/24";
+
+/// First three octets of the VPN subnet for dynamic client IP allocation.
+pub const VPN_SUBNET_OCTETS: [u8; 3] = [10, 66, 0];
 
 /// Default UDP tunnel port.
 pub const DEFAULT_UDP_PORT: u16 = 51820;
@@ -227,7 +230,10 @@ impl VpnCrypto {
     /// Returns `nonce(12 B) || ciphertext+tag(N+16 B)`.
     pub fn encrypt(&self, data: &[u8]) -> Vec<u8> {
         let nonce = ChaCha20Poly1305::generate_nonce(&mut rand::rngs::OsRng);
-        let ct = self.cipher.encrypt(&nonce, data).expect("encryption failed");
+        let ct = self
+            .cipher
+            .encrypt(&nonce, data)
+            .expect("encryption failed");
         let mut out = Vec::with_capacity(12 + ct.len());
         out.extend_from_slice(nonce.as_slice());
         out.extend_from_slice(&ct);

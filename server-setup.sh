@@ -51,18 +51,20 @@ BINARY="$SCRIPT_DIR/target/release/vpn-server"
 PID_FILE="$SCRIPT_DIR/vpn-server.pid"
 
 # ── Parse CLI flags ───────────────────────────────────────────────────────────
-MODE="setup"   # setup | run | build
+MODE="setup"   # setup | run | build | stop | status
 for arg in "$@"; do
     case "$arg" in
         --run)   MODE="run"   ;;
         --build) MODE="build" ;;
         --stop)  MODE="stop"  ;;
+        --status) MODE="status" ;;
         --help|-h)
-            echo "Usage: $0 [--run|--build|--stop]"
+            echo "Usage: $0 [--run|--build|--stop|--status]"
             echo "  (no flag)  Full setup: install deps, configure, build, run"
             echo "  --build    Rebuild the server binary only"
             echo "  --run      Load .env and start the server (no prompts)"
             echo "  --stop     Stop a running detached server"
+            echo "  --status   Show server health + connected peers"
             exit 0 ;;
     esac
 done
@@ -82,6 +84,41 @@ if [[ "$MODE" == "stop" ]]; then
     else
         warn "No PID file found at $PID_FILE. Is the server running?"
     fi
+    exit 0
+fi
+
+
+
+# ── Status mode ───────────────────────────────────────────────────────────────
+if [[ "$MODE" == "status" ]]; then
+    if [[ -f "$ENV_FILE" ]]; then
+        set -o allexport
+        source "$ENV_FILE"
+        set +o allexport
+    fi
+
+    API_PORT_V="${API_PORT:-8080}"
+    section "Server status"
+    if [[ -f "$PID_FILE" ]]; then
+        PID=$(cat "$PID_FILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            ok "vpn-server process is running (PID $PID)."
+        else
+            warn "PID file exists but process $PID is not running."
+        fi
+    else
+        warn "No PID file found at $PID_FILE."
+    fi
+
+    info "HTTP: GET /api/status"
+    curl -fsS "http://127.0.0.1:${API_PORT_V}/api/status" || true
+    echo ""
+    echo ""
+    info "Peers: GET /api/peers"
+    curl -fsS "http://127.0.0.1:${API_PORT_V}/api/peers" || true
+    echo ""
+    echo ""
+    info "Realtime monitor: watch -n 1 'curl -fsS http://127.0.0.1:${API_PORT_V}/api/peers | jq . 2>/dev/null || curl -fsS http://127.0.0.1:${API_PORT_V}/api/peers'"
     exit 0
 fi
 
@@ -354,15 +391,23 @@ open_ports() {
     local api_p="${API_PORT:-8080}"
     local udp_p="${UDP_PORT:-51820}"
     local prx_p="${PROXY_PORT:-8388}"
+    local ssh_p="${SSH_PORT:-22}"
 
     if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
         info "ufw detected — opening ports..."
+        ufw allow "${ssh_p}/tcp"  comment "SSH management"   2>/dev/null && ok "ufw: ${ssh_p}/tcp open"  || warn "ufw rule for ${ssh_p}/tcp failed (may already exist)"
         ufw allow "${api_p}/tcp"  comment "Lowkey API"       2>/dev/null && ok "ufw: ${api_p}/tcp open"  || warn "ufw rule for ${api_p}/tcp failed (may already exist)"
         ufw allow "${udp_p}/udp"  comment "Lowkey VPN tunnel" 2>/dev/null && ok "ufw: ${udp_p}/udp open"  || warn "ufw rule for ${udp_p}/udp failed"
         ufw allow "${prx_p}/tcp"  comment "Lowkey proxy"     2>/dev/null && ok "ufw: ${prx_p}/tcp open"  || warn "ufw rule for ${prx_p}/tcp failed"
     else
         info "Using iptables INPUT rules (no active ufw found)..."
+
+        # Keep existing SSH sessions alive.
+        iptables -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null \
+            || iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
         for rule_args in \
+            "-p tcp --dport ${ssh_p} -j ACCEPT" \
             "-p tcp --dport ${api_p} -j ACCEPT" \
             "-p udp --dport ${udp_p} -j ACCEPT" \
             "-p tcp --dport ${prx_p} -j ACCEPT"
@@ -373,7 +418,7 @@ open_ports() {
             # shellcheck disable=SC2086
             iptables -I INPUT 1 $rule_args
         done
-        ok "iptables: ports ${api_p}/tcp, ${udp_p}/udp, ${prx_p}/tcp opened."
+        ok "iptables: ports ${ssh_p}/tcp, ${api_p}/tcp, ${udp_p}/udp, ${prx_p}/tcp opened."
 
         # Persist rules so they survive a reboot
         if command -v iptables-save &>/dev/null; then
