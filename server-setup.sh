@@ -412,24 +412,68 @@ ok "Server started with PID $SERVER_PID."
 info "Tail logs: tail -f $SCRIPT_DIR/vpn-server.log"
 
 # =============================================================================
-# 7. CREATE TRIAL PROMO CODE
+# 6b. VERIFY SERVER IS ACTUALLY LISTENING
 # =============================================================================
-# Wait for the server to initialise the database schema before inserting the
-# trial promo code.  We try up to 10 seconds.
-section "Creating trial promo code"
+section "Verifying server health"
 
-TRIAL_CODE="TRIAL30"
-TRIAL_CREATED=false
 API_PORT_V="${API_PORT:-8080}"
+SERVER_UP=false
 
-for i in $(seq 1 10); do
+info "Waiting up to 15s for the server to accept connections on :${API_PORT_V} ..."
+for i in $(seq 1 15); do
     STATUS_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
-        "http://127.0.0.1:${API_PORT_V}/api/status" 2>/dev/null || true)
+        "http://127.0.0.1:${API_PORT_V}/api/status" --max-time 2 2>/dev/null || true)
     if [[ "$STATUS_HTTP" == "200" ]]; then
+        SERVER_UP=true
+        ok "Server is UP and answering on 127.0.0.1:${API_PORT_V} (HTTP $STATUS_HTTP)."
         break
     fi
     sleep 1
 done
+
+if [[ "$SERVER_UP" == "false" ]]; then
+    error "Server did NOT start within 15 seconds!"
+    error "Last ${API_PORT_V} curl HTTP code: ${STATUS_HTTP:-none}"
+    echo ""
+    warn "=== Last 30 lines of vpn-server.log ==="
+    tail -30 "$SCRIPT_DIR/vpn-server.log" 2>/dev/null || true
+    echo ""
+    warn "Is the process still alive?"
+    ps -p "$SERVER_PID" -o pid,stat,cmd 2>/dev/null || echo "  (process $SERVER_PID not found)"
+    echo ""
+    warn "Listening sockets on :${API_PORT_V}:"
+    ss -tlnp "sport = :${API_PORT_V}" 2>/dev/null || netstat -tlnp 2>/dev/null | grep "${API_PORT_V}" || true
+    echo ""
+    error "Fix the issues above and re-run: sudo $0 --run"
+    exit 1
+fi
+
+echo ""
+warn "------------------------------------------------------------------------"
+warn "  CLOUD FIREWALL REMINDER"
+warn "------------------------------------------------------------------------"
+warn "  iptables rules are now open, but many cloud providers also have a"
+warn "  SEPARATE network-level firewall (security groups, VPC firewall rules)."
+warn "  Make sure the following ports are allowed INBOUND in your cloud panel:"
+warn ""
+warn "    ${API_PORT_V}/tcp  -- HTTP API (required for client setup)"
+warn "    ${UDP_PORT:-51820}/udp  -- VPN tunnel"
+warn "    ${PROXY_PORT:-8388}/tcp  -- TCP proxy / SOCKS5"
+warn ""
+warn "  Yandex Cloud: VPC -> Security Groups -> add inbound rules"
+warn "  Hetzner     : Firewall -> add inbound rules"
+warn "  AWS EC2     : Security Group -> Inbound rules"
+warn "  DigitalOcean: Networking -> Firewalls -> Inbound rules"
+warn "------------------------------------------------------------------------"
+echo ""
+
+# =============================================================================
+# 7. CREATE TRIAL PROMO CODE
+# =============================================================================
+section "Creating trial promo code"
+
+TRIAL_CODE="TRIAL30"
+TRIAL_CREATED=false
 
 # Insert the trial code directly via psql if available.
 # The INSERT ... ON CONFLICT DO NOTHING makes it idempotent.
