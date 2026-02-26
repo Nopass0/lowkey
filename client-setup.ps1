@@ -45,6 +45,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Force UTF-8 I/O so localized API messages are displayed correctly.
+$OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -415,7 +420,11 @@ $subResp   = $null
 
 try {
     $subResp   = Invoke-ApiAuth -Path "/subscription/status" -Token $Token
-    $subStatus = (Get-OptionalPropertyValue -Object $subResp -Name "sub_status")
+    $subStatus = (Get-OptionalPropertyValue -Object $subResp -Name "status")
+    if (-not $subStatus) {
+        # Backward compatibility with older payloads.
+        $subStatus = (Get-OptionalPropertyValue -Object $subResp -Name "sub_status")
+    }
     if (-not $subStatus) {
         $subStatus = "unknown"
     }
@@ -426,7 +435,10 @@ try {
 Write-Host ""
 Write-Host "  Subscription : " -NoNewline
 Write-Host $subStatus -ForegroundColor Yellow
-$subExpiresAt = Get-OptionalPropertyValue -Object $subResp -Name "sub_expires_at"
+$subExpiresAt = Get-OptionalPropertyValue -Object $subResp -Name "expires_at"
+if (-not $subExpiresAt) {
+    $subExpiresAt = Get-OptionalPropertyValue -Object $subResp -Name "sub_expires_at"
+}
 if ($subExpiresAt) {
     Write-Host "  Expires      : $subExpiresAt"
 }
@@ -458,7 +470,10 @@ if ($subStatus -ne "active") {
                 $pr = Invoke-ApiAuth -Method Post -Path "/promo/apply" `
                     -Token $Token -Body @{ code = $promoCode.Trim() }
                 Write-Ok "Promo applied: $($pr.message)"
-                $promoExpiresAt = Get-OptionalPropertyValue -Object $pr -Name "sub_expires_at"
+                $promoExpiresAt = Get-OptionalPropertyValue -Object $pr -Name "expires_at"
+                if (-not $promoExpiresAt) {
+                    $promoExpiresAt = Get-OptionalPropertyValue -Object $pr -Name "sub_expires_at"
+                }
                 if ($promoExpiresAt) {
                     Write-Info "Active until: $promoExpiresAt"
                 }
@@ -501,7 +516,11 @@ if ($subStatus -ne "active") {
 # Refresh
 try {
     $subResp   = Invoke-ApiAuth -Path "/subscription/status" -Token $Token
-    $subStatus = (Get-OptionalPropertyValue -Object $subResp -Name "sub_status")
+    $subStatus = (Get-OptionalPropertyValue -Object $subResp -Name "status")
+    if (-not $subStatus) {
+        # Backward compatibility with older payloads.
+        $subStatus = (Get-OptionalPropertyValue -Object $subResp -Name "sub_status")
+    }
     if (-not $subStatus) {
         $subStatus = "unknown"
     }
@@ -509,7 +528,10 @@ try {
 
 $speedLabel = "unknown"
 if ($subResp) {
-    $subSpeedMbps = Get-OptionalPropertyValue -Object $subResp -Name "sub_speed_mbps"
+    $subSpeedMbps = Get-OptionalPropertyValue -Object $subResp -Name "speed_mbps"
+    if ($null -eq $subSpeedMbps) {
+        $subSpeedMbps = Get-OptionalPropertyValue -Object $subResp -Name "sub_speed_mbps"
+    }
     if ($null -eq $subSpeedMbps) {
         $speedLabel = "unknown"
     } elseif ($subSpeedMbps -eq 0) {
@@ -520,7 +542,10 @@ if ($subResp) {
 }
 
 $expiryLine = ""
-$subExpiresAt = Get-OptionalPropertyValue -Object $subResp -Name "sub_expires_at"
+$subExpiresAt = Get-OptionalPropertyValue -Object $subResp -Name "expires_at"
+if (-not $subExpiresAt) {
+    $subExpiresAt = Get-OptionalPropertyValue -Object $subResp -Name "sub_expires_at"
+}
 if ($subExpiresAt) {
     $expiryLine = "Expires      : $subExpiresAt"
 }
