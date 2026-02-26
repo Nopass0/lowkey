@@ -34,6 +34,7 @@ mod state;
 mod telegram;
 mod tunnel;
 mod user_api;
+mod ws_tunnel;
 
 use std::{
     collections::VecDeque,
@@ -47,7 +48,7 @@ use axum::{
 };
 use clap::Parser;
 use dashmap::DashMap;
-use tokio::{net::UdpSocket, sync::{Mutex, RwLock}, time::Duration};
+use tokio::{io::AsyncWriteExt, net::UdpSocket, sync::{mpsc, Mutex, RwLock}, time::Duration};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
@@ -155,6 +156,29 @@ async fn main() -> Result<()> {
     let public_ip = detect_public_ip().await.unwrap_or_else(|| local_ip.clone());
     info!("Local: {local_ip}  Public: {public_ip}");
 
+    // ── TUN interface (created before state so the inject channel can be wired in) ─
+    let mut tun_config = tun::Configuration::default();
+    tun_config
+        .address(VPN_SERVER_IP)
+        .netmask(VPN_NETMASK)
+        .destination(VPN_SUBNET)
+        .up();
+    #[cfg(target_os = "linux")]
+    tun_config.platform(|c| { c.packet_information(false); });
+
+    let tun_dev = tun::create_as_async(&tun_config)
+        .context("TUN creation failed — run as root / grant CAP_NET_ADMIN")?;
+    info!("TUN up ({})", VPN_SERVER_IP);
+
+    // Configure iptables MASQUERADE so VPN traffic can reach the internet
+    setup_nat().context("iptables/ip_forward failed")?;
+
+    // ── TUN inject channel ────────────────────────────────────────────────────
+    // WebSocket handlers push decrypted plaintext IP packets here; a dedicated
+    // task drains the channel and writes them directly into the TUN device.
+    // The sender is stored in ServerState so any handler can reach it.
+    let (tun_inject_tx, mut tun_inject_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
     // ── Shared state ──────────────────────────────────────────────────────────
     let state: Shared = Arc::new(ServerState {
         peers:       DashMap::new(),
@@ -171,29 +195,14 @@ async fn main() -> Result<()> {
         total_bytes_in:  AtomicU64::new(0),
         total_bytes_out: AtomicU64::new(0),
         logs:        Mutex::new(VecDeque::new()),
+        ws_peers:    DashMap::new(),
+        tun_inject:  tun_inject_tx,
         pool,
         jwt_secret:      args.jwt_secret.clone(),
         tg_bot_token:    args.tg_bot_token.clone(),
         tg_admin_chat_id: args.tg_admin_chat_id.clone(),
     });
-
-    // ── TUN interface ─────────────────────────────────────────────────────────
-    let mut tun_config = tun::Configuration::default();
-    tun_config
-        .address(VPN_SERVER_IP)
-        .netmask(VPN_NETMASK)
-        .destination(VPN_SUBNET)
-        .up();
-    #[cfg(target_os = "linux")]
-    tun_config.platform(|c| { c.packet_information(false); });
-
-    let tun_dev = tun::create_as_async(&tun_config)
-        .context("TUN creation failed — run as root / grant CAP_NET_ADMIN")?;
-    info!("TUN up ({})", VPN_SERVER_IP);
     state.push_log(format!("TUN up — {VPN_SERVER_IP}/24"));
-
-    // Configure iptables MASQUERADE so VPN traffic can reach the internet
-    setup_nat().context("iptables/ip_forward failed")?;
 
     // ── UDP socket ────────────────────────────────────────────────────────────
     let udp = Arc::new(
@@ -203,17 +212,30 @@ async fn main() -> Result<()> {
     info!("UDP tunnel on :{}", args.udp_port);
     state.push_log(format!("UDP on :{}", args.udp_port));
 
-    // Split TUN into read/write halves; protect write half with a Mutex since
-    // it is shared across threads.
+    // Split TUN into read/write halves; protect the write half with a Mutex
+    // so the UDP→TUN task and the WS inject task can share it safely.
     let (tun_rx, tun_tx) = tokio::io::split(tun_dev);
     let tun_tx = Arc::new(Mutex::new(tun_tx));
+
+    // Drain the tun_inject channel into the TUN write half
+    {
+        let tw = tun_tx.clone();
+        tokio::spawn(async move {
+            while let Some(pkt) = tun_inject_rx.recv().await {
+                let mut w = tw.lock().await;
+                if let Err(e) = w.write_all(&pkt).await {
+                    tracing::error!("TUN inject write error: {e}");
+                }
+            }
+        });
+    }
 
     // ── Tunnel tasks ──────────────────────────────────────────────────────────
     {
         let (s, u) = (state.clone(), udp.clone());
         tokio::spawn(async move {
             if let Err(e) = tunnel::task_tun_to_udp(tun_rx, u, s).await {
-                tracing::error!("TUN→UDP task died: {e}");
+                tracing::error!("TUN→peer task died: {e}");
             }
         });
     }
@@ -260,6 +282,8 @@ async fn main() -> Result<()> {
         .route("/admin/users",           get(admin_api::list_users))
         .route("/admin/users/:id/limit", put(admin_api::set_user_limit))
         .route("/admin/peers",           get(admin_api::list_peers))
+        // ── WebSocket VPN tunnel (firewall-bypass transport) ──────────────────
+        .route("/ws-tunnel", get(ws_tunnel::ws_handler))
         // CORS: allow all origins so web-based admin panels can talk to the API
         .layer(CorsLayer::permissive())
         .with_state(state.clone());

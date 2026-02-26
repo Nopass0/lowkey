@@ -22,6 +22,14 @@ reqwest      = { version = "0.12", default-features = false, features = ["json",
 x25519-dalek = { version = "2",    features = ["static_secrets", "getrandom"] }
 rand         = "0.8"
 
+# WebSocket transport (all platforms)
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
+futures      = "0.3"
+
 # TUN device (Linux / macOS only)
 [target.'cfg(unix)'.dependencies]
 tun          = { version = "0.6",  features = ["async"] }
+
+# WinTUN kernel driver (Windows only — system-level VPN adapter)
+[target.'cfg(windows)'.dependencies]
+wintun       = { version = "0.4" }

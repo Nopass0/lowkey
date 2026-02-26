@@ -26,7 +26,7 @@ use std::{
 
 use dashmap::DashMap;
 use sqlx::PgPool;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use vpn_common::VpnCrypto;
 
 // ── Token-bucket rate limiter ─────────────────────────────────────────────────
@@ -252,6 +252,22 @@ pub struct ServerState {
     /// Uses a non-blocking `try_lock` so slow log writes never stall the
     /// data path.
     pub logs: Mutex<VecDeque<String>>,
+
+    // ── WebSocket tunnel support ──────────────────────────────────────────────
+
+    /// VPN IP → channel sender for WebSocket-mode peers.
+    ///
+    /// When the TUN→peer task wants to deliver a packet to a WS client it
+    /// looks up the sender here and pushes the already-encrypted payload.
+    /// The WS handler on the other end reads from the matching receiver and
+    /// writes it as a binary WebSocket frame.
+    pub ws_peers: DashMap<Ipv4Addr, mpsc::UnboundedSender<Vec<u8>>>,
+
+    /// Inject decrypted IP packets into the TUN device from WebSocket handlers.
+    ///
+    /// WS handlers push plaintext IP packets here; a dedicated task drains
+    /// the channel and writes them to the TUN write-half.
+    pub tun_inject: mpsc::UnboundedSender<Vec<u8>>,
 
     // ── PostgreSQL connection pool ─────────────────────────────────────────────
 
