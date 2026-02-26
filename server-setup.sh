@@ -338,6 +338,49 @@ if [[ -f "$PID_FILE" ]]; then
     rm -f "$PID_FILE"
 fi
 
+# =============================================================================
+# 5b. OPEN FIREWALL PORTS
+# =============================================================================
+section "Opening firewall ports"
+
+open_ports() {
+    local api_p="${API_PORT:-8080}"
+    local udp_p="${UDP_PORT:-51820}"
+    local prx_p="${PROXY_PORT:-8388}"
+
+    if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
+        info "ufw detected — opening ports..."
+        ufw allow "${api_p}/tcp"  comment "Lowkey API"       2>/dev/null && ok "ufw: ${api_p}/tcp open"  || warn "ufw rule for ${api_p}/tcp failed (may already exist)"
+        ufw allow "${udp_p}/udp"  comment "Lowkey VPN tunnel" 2>/dev/null && ok "ufw: ${udp_p}/udp open"  || warn "ufw rule for ${udp_p}/udp failed"
+        ufw allow "${prx_p}/tcp"  comment "Lowkey proxy"     2>/dev/null && ok "ufw: ${prx_p}/tcp open"  || warn "ufw rule for ${prx_p}/tcp failed"
+    else
+        info "Using iptables INPUT rules (no active ufw found)..."
+        for rule_args in \
+            "-p tcp --dport ${api_p} -j ACCEPT" \
+            "-p udp --dport ${udp_p} -j ACCEPT" \
+            "-p tcp --dport ${prx_p} -j ACCEPT"
+        do
+            # Remove duplicate first (idempotent), then insert at position 1
+            # shellcheck disable=SC2086
+            iptables -D INPUT $rule_args 2>/dev/null || true
+            # shellcheck disable=SC2086
+            iptables -I INPUT 1 $rule_args
+        done
+        ok "iptables: ports ${api_p}/tcp, ${udp_p}/udp, ${prx_p}/tcp opened."
+
+        # Persist rules so they survive a reboot
+        if command -v iptables-save &>/dev/null; then
+            if command -v netfilter-persistent &>/dev/null; then
+                netfilter-persistent save 2>/dev/null || true
+            elif [[ -d /etc/iptables ]]; then
+                iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+            fi
+        fi
+    fi
+}
+
+open_ports
+
 # Build the argument list from environment variables
 SERVER_ARGS=(
     "--api-port"   "${API_PORT:-8080}"
