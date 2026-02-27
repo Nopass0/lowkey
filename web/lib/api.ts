@@ -1,6 +1,15 @@
 // API client for Lowkey VPN backend
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const runtimeDefaultApiBase = (() => {
+  if (typeof window === 'undefined') {
+    return 'http://localhost:8080';
+  }
+
+  const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+  return `${protocol}//${window.location.hostname}:8080`;
+})();
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || runtimeDefaultApiBase;
 
 interface FetchOptions extends RequestInit {
   token?: string;
