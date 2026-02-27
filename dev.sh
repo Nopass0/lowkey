@@ -103,16 +103,45 @@ kill_port_listeners() {
 }
 
 free_dev_ports() {
+    local target="${1:-all}"
     local api_port="${API_PORT:-8080}"
     local udp_port="${UDP_PORT:-51820}"
     local proxy_port="${PROXY_PORT:-8388}"
     local web_port="${WEB_PORT:-3000}"
 
     info "Ensuring required ports are free before startup..."
-    kill_port_listeners tcp "$api_port" "HTTP API"
-    kill_port_listeners udp "$udp_port" "UDP VPN"
-    kill_port_listeners tcp "$proxy_port" "TCP proxy"
-    kill_port_listeners tcp "$web_port" "Next.js web"
+
+    case "$target" in
+        server)
+            kill_port_listeners tcp "$api_port" "HTTP API"
+            kill_port_listeners udp "$udp_port" "UDP VPN"
+            kill_port_listeners tcp "$proxy_port" "TCP proxy"
+            ;;
+        web)
+            kill_port_listeners tcp "$web_port" "Next.js web"
+            ;;
+        all)
+            kill_port_listeners tcp "$api_port" "HTTP API"
+            kill_port_listeners udp "$udp_port" "UDP VPN"
+            kill_port_listeners tcp "$proxy_port" "TCP proxy"
+            kill_port_listeners tcp "$web_port" "Next.js web"
+            ;;
+        *)
+            err "Unknown free_dev_ports target: $target"
+            return 1
+            ;;
+    esac
+}
+
+ensure_npm_deps() {
+    local target_dir="$1"
+
+    if [[ -d "$target_dir/node_modules" ]]; then
+        info "Dependencies already installed in $(basename "$target_dir"), skipping install."
+        return 0
+    fi
+
+    install_npm_deps "$target_dir"
 }
 
 # ── Dependency checks ─────────────────────────────────────────────────────────
@@ -251,7 +280,7 @@ start_server() {
     section "Starting VPN server (dev mode)"
     cd "$SCRIPT_DIR"
     load_env
-    free_dev_ports
+    free_dev_ports server
 
     if [[ $EUID -ne 0 ]]; then
         warn "Running server without root privileges."
@@ -273,9 +302,9 @@ start_web() {
     cd "$SCRIPT_DIR/web"
 
     ensure_latest_node
-    free_dev_ports
+    free_dev_ports web
 
-    install_npm_deps "$SCRIPT_DIR/web"
+    ensure_npm_deps "$SCRIPT_DIR/web"
 
     export NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://localhost:${API_PORT:-8080}}"
     info "Web running at http://localhost:${WEB_PORT:-3000}"
@@ -291,7 +320,7 @@ start_desktop() {
 
     ensure_latest_node
 
-    install_npm_deps "$SCRIPT_DIR/vpn-desktop"
+    ensure_npm_deps "$SCRIPT_DIR/vpn-desktop"
 
     info "Starting Tauri in development mode..."
     npm run tauri:dev

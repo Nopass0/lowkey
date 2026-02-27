@@ -29,7 +29,7 @@ export default function LoginView() {
   };
 
   return (
-    <div className="h-screen flex flex-col items-center justify-center p-6" style={{ background: 'var(--bg)' }}>
+    <div className="min-h-screen flex flex-col items-center justify-center p-6 py-8" style={{ background: 'var(--bg)' }}>
       {/* Background glow */}
       <div className="fixed inset-0 pointer-events-none">
         <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-64 h-64 rounded-full opacity-10 blur-3xl"

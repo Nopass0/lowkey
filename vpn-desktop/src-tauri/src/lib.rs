@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 use tauri::{
-    AppHandle, Manager, Runtime, State,
+    AppHandle, Manager, State,
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
 };
@@ -211,6 +211,7 @@ fn update_tray_icon(app: &AppHandle, connected: bool) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let vpn_state = Arc::new(VpnState::default());
+    let start_hidden = std::env::args().any(|arg| arg == "--hidden");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -268,8 +269,15 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Handle window close → minimize to tray
             if let Some(window) = app.get_webview_window("main") {
+                if start_hidden {
+                    let _ = window.hide();
+                } else {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+
+                // Handle window close → minimize to tray
                 let window_ = window.clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
