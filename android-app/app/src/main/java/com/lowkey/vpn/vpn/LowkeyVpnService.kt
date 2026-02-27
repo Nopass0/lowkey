@@ -32,18 +32,18 @@ class LowkeyVpnService : VpnService() {
     private val scope = CoroutineScope(Dispatchers.IO)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val host = intent?.getStringExtra("host") ?: return START_NOT_STICKY
-        val port = intent.getIntExtra("port", 8443)
-        val token = intent.getStringExtra("token") ?: return START_NOT_STICKY
+        val host  = intent?.getStringExtra("host")  ?: return START_NOT_STICKY
+        val port  = intent.getIntExtra("port", 51820)
+        val psk   = intent.getStringExtra("psk")   ?: return START_NOT_STICKY
         val vpnIp = intent.getStringExtra("vpn_ip") ?: "10.0.0.2"
 
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
-        startTunnel(host, port, token, vpnIp)
+        startTunnel(host, port, psk, vpnIp)
         return START_STICKY
     }
 
-    private fun startTunnel(host: String, port: Int, token: String, vpnIp: String) {
+    private fun startTunnel(host: String, port: Int, psk: String, vpnIp: String) {
         val builder = Builder()
             .setSession("Lowkey VPN")
             .addAddress(vpnIp, 24)
@@ -55,11 +55,11 @@ class LowkeyVpnService : VpnService() {
         vpnInterface = builder.establish() ?: return
 
         tunnelJob = scope.launch {
-            runTunnel(host, port, token)
+            runTunnel(host, port, psk)
         }
     }
 
-    private fun runTunnel(host: String, port: Int, token: String) {
+    private fun runTunnel(host: String, port: Int, psk: String) {
         val tun = vpnInterface ?: return
         val inStream = FileInputStream(tun.fileDescriptor)
         val outStream = FileOutputStream(tun.fileDescriptor)
@@ -72,8 +72,8 @@ class LowkeyVpnService : VpnService() {
             val buffer = ByteBuffer.allocate(32767)
             val packet = ByteArray(32767)
 
-            // Send auth packet
-            val authBytes = "AUTH:$token".toByteArray()
+            // Send auth packet with the pre-shared key
+            val authBytes = "AUTH:$psk".toByteArray()
             socket.send(DatagramPacket(authBytes, authBytes.size, serverAddress, port))
 
             // Relay packets between VPN interface and UDP tunnel

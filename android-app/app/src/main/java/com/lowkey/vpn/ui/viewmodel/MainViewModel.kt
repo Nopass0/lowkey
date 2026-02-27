@@ -5,18 +5,28 @@ import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lowkey.vpn.data.LowkeyApiService
+import com.lowkey.vpn.data.PaymentItem
 import com.lowkey.vpn.data.PlanModel
 import com.lowkey.vpn.data.ReferralStatsModel
 import com.lowkey.vpn.data.UserModel
+import com.lowkey.vpn.data.WithdrawalModel
 import com.lowkey.vpn.vpn.LowkeyVpnService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
+/**
+ * Main ViewModel — manages auth state, subscription data and VPN connection.
+ *
+ * UI state is exposed as read-only [StateFlow]s.  All network calls run inside
+ * [viewModelScope] so they are automatically cancelled on ViewModel clear.
+ */
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val api = LowkeyApiService(application)
+
+    // ── Auth ──────────────────────────────────────────────────────────────────
 
     private val _token = MutableStateFlow<String?>(null)
     val token: StateFlow<String?> = _token
@@ -24,11 +34,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _user = MutableStateFlow<UserModel?>(null)
     val user: StateFlow<UserModel?> = _user
 
+    // ── VPN ───────────────────────────────────────────────────────────────────
+
     private val _connected = MutableStateFlow(false)
     val connected: StateFlow<Boolean> = _connected
 
     private val _toggling = MutableStateFlow(false)
     val toggling: StateFlow<Boolean> = _toggling
+
+    // ── Subscription & data ───────────────────────────────────────────────────
 
     private val _plans = MutableStateFlow<List<PlanModel>>(emptyList())
     val plans: StateFlow<List<PlanModel>> = _plans
@@ -36,49 +50,75 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _refStats = MutableStateFlow<ReferralStatsModel?>(null)
     val refStats: StateFlow<ReferralStatsModel?> = _refStats
 
+    private val _payHistory = MutableStateFlow<List<PaymentItem>>(emptyList())
+    val payHistory: StateFlow<List<PaymentItem>> = _payHistory
+
+    private val _withdrawals = MutableStateFlow<List<WithdrawalModel>>(emptyList())
+    val withdrawals: StateFlow<List<WithdrawalModel>> = _withdrawals
+
+    // ── Loading / messages ────────────────────────────────────────────────────
+
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error
 
-    // Payment modal state
+    private val _successMsg = MutableStateFlow<String?>(null)
+    val successMsg: StateFlow<String?> = _successMsg
+
+    // ── Payment modal ─────────────────────────────────────────────────────────
+
     private val _showPayModal = MutableStateFlow(false)
     val showPayModal: StateFlow<Boolean> = _showPayModal
 
     private val _paymentQrUrl = MutableStateFlow<String?>(null)
     val paymentQrUrl: StateFlow<String?> = _paymentQrUrl
 
-    private val _paymentId = MutableStateFlow<String?>(null)
-    val paymentId: StateFlow<String?> = _paymentId
+    private val _currentPaymentId = MutableStateFlow<Int?>(null)
+    val currentPaymentId: StateFlow<Int?> = _currentPaymentId
 
     private val _paymentStatus = MutableStateFlow<String?>(null)
     val paymentStatus: StateFlow<String?> = _paymentStatus
 
     init {
-        // Restore token from prefs
         val savedToken = api.token
         if (savedToken != null) {
             _token.value = savedToken
-            viewModelScope.launch {
-                loadUserData()
-            }
+            viewModelScope.launch { loadUserData() }
         }
     }
+
+    // ── Auth ──────────────────────────────────────────────────────────────────
 
     fun login(login: String, password: String) {
         viewModelScope.launch {
             _isLoading.value = true
             _error.value = null
-            val result = api.login(login, password)
-            result.onSuccess { auth ->
-                api.token = auth.token
-                _token.value = auth.token
-                _user.value = auth.user
-                loadUserData()
-            }.onFailure { e ->
-                _error.value = e.message ?: "Ошибка входа"
-            }
+            api.login(login, password)
+                .onSuccess { auth ->
+                    api.token = auth.token
+                    _token.value = auth.token
+                    _user.value = auth.user
+                    loadUserData()
+                }
+                .onFailure { _error.value = it.message ?: "Ошибка входа" }
+            _isLoading.value = false
+        }
+    }
+
+    fun register(login: String, password: String, referralCode: String?) {
+        viewModelScope.launch {
+            _isLoading.value = true
+            _error.value = null
+            api.register(login, password, referralCode.takeIf { !it.isNullOrBlank() })
+                .onSuccess { auth ->
+                    api.token = auth.token
+                    _token.value = auth.token
+                    _user.value = auth.user
+                    loadUserData()
+                }
+                .onFailure { _error.value = it.message ?: "Ошибка регистрации" }
             _isLoading.value = false
         }
     }
@@ -90,29 +130,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _connected.value = false
         _plans.value = emptyList()
         _refStats.value = null
-        // Stop VPN if connected
+        _payHistory.value = emptyList()
+        _withdrawals.value = emptyList()
         val ctx = getApplication<Application>()
         ctx.stopService(Intent(ctx, LowkeyVpnService::class.java))
     }
 
+    // ── Data loading ──────────────────────────────────────────────────────────
+
     private suspend fun loadUserData() {
-        // Load user info
-        api.me().onSuccess { u ->
-            _user.value = u
-        }
-        // Load plans
-        api.getPlans().onSuccess { p ->
-            _plans.value = p
-        }
-        // Load referral stats
-        api.getReferralStats().onSuccess { stats ->
-            _refStats.value = stats
-        }
-        // Check VPN status
-        api.getVpnStatus().onSuccess { status ->
-            _connected.value = status.connected
-        }
+        api.me().onSuccess { _user.value = it }
+        api.getPlans().onSuccess { _plans.value = it }
+        api.getReferralStats().onSuccess { _refStats.value = it }
+        api.getPaymentHistory().onSuccess { _payHistory.value = it.payments }
+        api.getWithdrawals().onSuccess { _withdrawals.value = it.withdrawals }
     }
+
+    fun refreshAll() {
+        viewModelScope.launch { loadUserData() }
+    }
+
+    // ── VPN ───────────────────────────────────────────────────────────────────
 
     fun toggleVpn() {
         viewModelScope.launch {
@@ -121,89 +159,121 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val ctx = getApplication<Application>()
 
             if (_connected.value) {
-                // Disconnect
                 ctx.stopService(Intent(ctx, LowkeyVpnService::class.java))
                 delay(500)
                 _connected.value = false
             } else {
-                // Connect - register VPN session
-                val result = api.registerVpn()
-                result.onSuccess { creds ->
-                    val intent = Intent(ctx, LowkeyVpnService::class.java).apply {
-                        putExtra("host", creds.host)
-                        putExtra("port", creds.port)
-                        putExtra("token", creds.token)
-                        putExtra("vpn_ip", creds.vpnIp)
+                api.registerVpn()
+                    .onSuccess { creds ->
+                        // Extract hostname from the configured API URL
+                        val host = api.apiUrl
+                            .removePrefix("https://")
+                            .removePrefix("http://")
+                            .split(":")[0]
+                            .split("/")[0]
+
+                        val intent = Intent(ctx, LowkeyVpnService::class.java).apply {
+                            putExtra("host",   host)
+                            putExtra("port",   creds.udpPort)
+                            putExtra("psk",    creds.psk)
+                            putExtra("vpn_ip", creds.vpnIp)
+                        }
+                        ctx.startService(intent)
+                        delay(1000)
+                        _connected.value = true
                     }
-                    ctx.startService(intent)
-                    delay(1000)
-                    _connected.value = true
-                }.onFailure { e ->
-                    _error.value = e.message ?: "Ошибка подключения"
-                }
+                    .onFailure { _error.value = it.message ?: "Ошибка подключения" }
             }
             _toggling.value = false
         }
     }
 
+    // ── Payment modal ─────────────────────────────────────────────────────────
+
     fun openPayModal() {
-        _showPayModal.value = true
-        _paymentQrUrl.value = null
-        _paymentId.value = null
-        _paymentStatus.value = null
+        _showPayModal.value     = true
+        _paymentQrUrl.value     = null
+        _currentPaymentId.value = null
+        _paymentStatus.value    = null
     }
 
     fun closePayModal() {
-        _showPayModal.value = false
-        _paymentQrUrl.value = null
-        _paymentId.value = null
-        _paymentStatus.value = null
+        _showPayModal.value     = false
+        _paymentQrUrl.value     = null
+        _currentPaymentId.value = null
+        _paymentStatus.value    = null
     }
 
-    fun createPayment(amount: Double, paymentType: String, planKey: String? = null) {
+    fun createPayment(amount: Double, purpose: String, planKey: String? = null) {
         viewModelScope.launch {
             _isLoading.value = true
             _error.value = null
-            val result = api.createSbpPayment(amount, paymentType, planKey)
-            result.onSuccess { payment ->
-                _paymentQrUrl.value = payment.qrUrl
-                _paymentId.value = payment.paymentId
-                _paymentStatus.value = "pending"
-                startPollingPayment(payment.paymentId)
-            }.onFailure { e ->
-                _error.value = e.message ?: "Ошибка создания платежа"
-            }
+            api.createSbpPayment(amount, purpose, planKey)
+                .onSuccess { payment ->
+                    _paymentQrUrl.value     = payment.qrUrl
+                    _currentPaymentId.value = payment.paymentId
+                    _paymentStatus.value    = "pending"
+                    startPollingPayment(payment.paymentId)
+                }
+                .onFailure { _error.value = it.message ?: "Ошибка создания платежа" }
             _isLoading.value = false
         }
     }
 
-    private fun startPollingPayment(paymentId: String) {
+    private fun startPollingPayment(paymentId: Int) {
         viewModelScope.launch {
-            repeat(60) { // Poll for up to 2.5 minutes
+            repeat(60) {
                 delay(2500)
-                val status = api.getPaymentStatus(paymentId)
-                status.onSuccess { s ->
-                    _paymentStatus.value = s.status
-                    if (s.status == "paid") {
-                        // Reload user data to update balance/subscription
-                        loadUserData()
-                        return@launch
+                api.getPaymentStatus(paymentId)
+                    .onSuccess { s ->
+                        _paymentStatus.value = s.status
+                        if (s.status == "paid") {
+                            loadUserData()
+                            return@launch
+                        }
                     }
-                }
                 if (_paymentStatus.value != "pending") return@launch
             }
         }
     }
 
-    fun refreshRefStats() {
+    // ── Promo codes ────────────────────────────────────────────────────────────
+
+    fun applyPromo(code: String) {
         viewModelScope.launch {
-            api.getReferralStats().onSuccess { stats ->
-                _refStats.value = stats
-            }
+            _isLoading.value = true
+            _error.value = null
+            _successMsg.value = null
+            api.applyPromo(code)
+                .onSuccess { resp ->
+                    _successMsg.value = resp.message
+                    loadUserData()
+                }
+                .onFailure { _error.value = it.message ?: "Неверный промокод" }
+            _isLoading.value = false
         }
     }
 
-    fun clearError() {
-        _error.value = null
+    // ── Referral withdrawal ───────────────────────────────────────────────────
+
+    fun requestWithdrawal(amount: Double, cardNumber: String, bankName: String?) {
+        viewModelScope.launch {
+            _isLoading.value = true
+            _error.value = null
+            _successMsg.value = null
+            api.requestWithdrawal(amount, cardNumber, bankName)
+                .onSuccess { resp ->
+                    _successMsg.value = "Заявка #${resp.withdrawalId} создана. Ожидайте подтверждения."
+                    api.getWithdrawals().onSuccess { _withdrawals.value = it.withdrawals }
+                    api.getReferralStats().onSuccess { _refStats.value = it }
+                }
+                .onFailure { _error.value = it.message ?: "Ошибка вывода" }
+            _isLoading.value = false
+        }
     }
+
+    // ── Misc ──────────────────────────────────────────────────────────────────
+
+    fun clearError()   { _error.value = null }
+    fun clearSuccess() { _successMsg.value = null }
 }
