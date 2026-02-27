@@ -31,7 +31,7 @@ export default function LoginPage() {
       {/* Background orbs */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-1/4 left-1/3 w-96 h-96 rounded-full opacity-5 blur-3xl"
-          style={{ background: 'radial-gradient(circle, #00ff88, transparent)' }} />
+          style={{ background: 'radial-gradient(circle, #3b82f6, transparent)' }} />
         <div className="absolute bottom-1/4 right-1/3 w-96 h-96 rounded-full opacity-5 blur-3xl"
           style={{ background: 'radial-gradient(circle, #0066ff, transparent)' }} />
       </div>
@@ -46,15 +46,15 @@ export default function LoginPage() {
           {/* Logo */}
           <div className="text-center mb-8">
             <Link href="/" className="inline-flex items-center gap-2 mb-4">
-              <div className="w-10 h-10 rounded-xl glow-green flex items-center justify-center"
-                style={{ background: 'linear-gradient(135deg, #00ff88, #0066ff)' }}>
-                <Shield className="w-5 h-5 text-black" />
+              <div className="w-10 h-10 rounded-xl glow-blue flex items-center justify-center"
+                style={{ background: 'linear-gradient(135deg, #3b82f6, #2563eb)' }}>
+                <Shield className="w-5 h-5 text-white" />
               </div>
               <span className="text-xl font-bold gradient-text">Lowkey VPN</span>
             </Link>
             <h1 className="text-2xl font-bold">Вход в аккаунт</h1>
             <p className="text-sm mt-2" style={{ color: 'var(--muted-foreground)' }}>
-              Нет аккаунта? <Link href="/auth/register" className="hover:text-white transition-colors" style={{ color: '#00ff88' }}>Зарегистрироваться</Link>
+              Нет аккаунта? <Link href="/auth/register" className="hover:text-white transition-colors" style={{ color: '#60a5fa' }}>Зарегистрироваться</Link>
             </p>
           </div>
 
@@ -111,7 +111,7 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={isLoading}
-              className="btn btn-primary w-full py-3 mt-2 glow-green"
+              className="btn btn-primary w-full py-3 mt-2 glow-blue"
             >
               {isLoading ? (
                 <span className="flex items-center gap-2">

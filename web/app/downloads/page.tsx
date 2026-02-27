@@ -37,7 +37,7 @@ export default function DownloadsPage() {
       {/* Background */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-1/4 left-1/4 w-96 h-96 rounded-full opacity-5 blur-3xl"
-          style={{ background: 'radial-gradient(circle,#00ff88,transparent)' }} />
+          style={{ background: 'radial-gradient(circle,#3b82f6,transparent)' }} />
         <div className="absolute bottom-1/4 right-1/4 w-96 h-96 rounded-full opacity-5 blur-3xl"
           style={{ background: 'radial-gradient(circle,#0066ff,transparent)' }} />
       </div>
@@ -47,8 +47,8 @@ export default function DownloadsPage() {
         <div className="flex items-center gap-2 mb-12">
           <Link href="/" className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg flex items-center justify-center"
-              style={{ background: 'linear-gradient(135deg,#00ff88,#0066ff)' }}>
-              <Shield className="w-4 h-4 text-black" />
+              style={{ background: 'linear-gradient(135deg,#3b82f6,#2563eb)' }}>
+              <Shield className="w-4 h-4 text-white" />
             </div>
             <span className="font-bold gradient-text">Lowkey VPN</span>
           </Link>
@@ -75,8 +75,8 @@ export default function DownloadsPage() {
                   <div className="p-6 flex items-center justify-between flex-wrap gap-4">
                     <div className="flex items-center gap-4">
                       <div className="w-14 h-14 rounded-xl flex items-center justify-center"
-                        style={{ background: 'rgba(0,255,136,0.1)' }}>
-                        <PIcon className="w-7 h-7" style={{ color: '#00ff88' }} />
+                        style={{ background: 'rgba(59,130,246,0.1)' }}>
+                        <PIcon className="w-7 h-7" style={{ color: '#60a5fa' }} />
                       </div>
                       <div>
                         <h3 className="font-bold text-xl">{platform.label}</h3>
@@ -84,7 +84,7 @@ export default function DownloadsPage() {
                         {release ? (
                           <div className="flex items-center gap-3 mt-1 text-xs" style={{ color: 'var(--muted-foreground)' }}>
                             <span className="flex items-center gap-1">
-                              <CheckCircle className="w-3 h-3" style={{ color: '#00ff88' }} />
+                              <CheckCircle className="w-3 h-3" style={{ color: '#60a5fa' }} />
                               v{release.version}
                             </span>
                             {release.file_size_bytes && (
@@ -105,7 +105,7 @@ export default function DownloadsPage() {
 
                     {release ? (
                       <a href={release.download_url}
-                        className="btn btn-primary flex items-center gap-2 glow-green"
+                        className="btn btn-primary flex items-center gap-2 glow-blue"
                         download={release.file_name || undefined}>
                         <Download className="w-4 h-4" />
                         Скачать{release.file_name ? ` ${release.file_name.split('.').pop()?.toUpperCase()}` : ''}
@@ -151,7 +151,7 @@ export default function DownloadsPage() {
             <h2 className="text-xl font-bold mb-5">Быстрая установка через терминал</h2>
             <div className="space-y-4">
               <div>
-                <div className="flex items-center gap-2 text-sm font-medium mb-2" style={{ color: '#00ff88' }}>
+                <div className="flex items-center gap-2 text-sm font-medium mb-2" style={{ color: '#60a5fa' }}>
                   <Server className="w-4 h-4" /> Linux / macOS
                 </div>
                 <code className="block p-3 rounded-xl text-sm font-mono overflow-x-auto"
@@ -160,7 +160,7 @@ export default function DownloadsPage() {
                 </code>
               </div>
               <div>
-                <div className="flex items-center gap-2 text-sm font-medium mb-2" style={{ color: '#00ff88' }}>
+                <div className="flex items-center gap-2 text-sm font-medium mb-2" style={{ color: '#60a5fa' }}>
                   <Monitor className="w-4 h-4" /> Windows PowerShell (от Администратора)
                 </div>
                 <code className="block p-3 rounded-xl text-sm font-mono overflow-x-auto"
@@ -174,10 +174,10 @@ export default function DownloadsPage() {
           {/* Auto-update info */}
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }}
             className="rounded-2xl p-5 flex items-start gap-3"
-            style={{ background: 'rgba(0,255,136,0.06)', border: '1px solid rgba(0,255,136,0.2)' }}>
-            <CheckCircle className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: '#00ff88' }} />
+            style={{ background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.2) }}>
+            <CheckCircle className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: '#60a5fa' }} />
             <div>
-              <div className="font-semibold" style={{ color: '#00ff88' }}>Автообновление</div>
+              <div className="font-semibold" style={{ color: '#60a5fa' }}>Автообновление</div>
               <div className="text-sm mt-1" style={{ color: 'var(--muted-foreground)' }}>
                 Приложения проверяют наличие обновлений при каждом запуске и предлагают обновиться до актуальной версии.
                 Обновление загружается в фоне — VPN продолжает работать.

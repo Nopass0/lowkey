@@ -77,21 +77,35 @@ kill_port_listeners() {
 
     if command -v lsof &>/dev/null; then
         if [[ "$proto" == "tcp" ]]; then
-            pids=$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u | tr '\n' ' ')
+            pids=$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
         else
-            pids=$(lsof -t -iUDP:"$port" 2>/dev/null | sort -u | tr '\n' ' ')
+            pids=$(lsof -t -iUDP:"$port" 2>/dev/null || true)
         fi
+        pids=$(echo "$pids" | sort -u | tr '\n' ' ')
     fi
 
-    if [[ -z "$pids" ]] && command -v fuser &>/dev/null; then
+    if [[ -z "${pids// /}" ]] && command -v ss &>/dev/null; then
         if [[ "$proto" == "tcp" ]]; then
-            pids=$(fuser -n tcp "$port" 2>/dev/null | tr ' ' '\n' | sort -u | tr '\n' ' ')
+            pids=$(ss -tlnp "sport = :$port" 2>/dev/null | awk 'NR>1 && /pid=/{match($0,/pid=([0-9]+)/,a); if(a[1]) print a[1]}' | sort -u | tr '\n' ' ' || true)
         else
-            pids=$(fuser -n udp "$port" 2>/dev/null | tr ' ' '\n' | sort -u | tr '\n' ' ')
+            pids=$(ss -ulnp "sport = :$port" 2>/dev/null | awk 'NR>1 && /pid=/{match($0,/pid=([0-9]+)/,a); if(a[1]) print a[1]}' | sort -u | tr '\n' ' ' || true)
         fi
     fi
 
+    if [[ -z "${pids// /}" ]] && command -v fuser &>/dev/null; then
+        if [[ "$proto" == "tcp" ]]; then
+            pids=$(fuser -n tcp "$port" 2>/dev/null | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)
+        else
+            pids=$(fuser -n udp "$port" 2>/dev/null | tr ' ' '\n' | sort -u | tr '\n' ' ' || true)
+        fi
+    fi
+
+    pids="${pids// /}"
     if [[ -n "$pids" ]]; then
+        pids=$(echo "$pids" | tr ' ' '\n' | grep -v '^$' | tr '\n' ' ')
+    fi
+
+    if [[ -n "${pids// /}" ]]; then
         warn "Port $port/$proto ($label) is busy. Stopping processes: $pids"
         # shellcheck disable=SC2086
         kill -TERM $pids 2>/dev/null || true
@@ -331,22 +345,51 @@ start_desktop() {
 start_all() {
     section "Starting all services (server + web)"
 
-    bash "$SCRIPT_DIR/dev.sh" --server &
-    SERVER_PID=$!
-    sleep 2
+    # Load env and free all ports ONCE before spawning sub-processes
+    load_env
+    free_dev_ports all
 
-    bash "$SCRIPT_DIR/dev.sh" --web &
+    # Start server in background (sub-shell loads its own env)
+    (
+        cd "$SCRIPT_DIR"
+        info "Server will listen on:"
+        info "  HTTP API  → http://0.0.0.0:${API_PORT:-8080}"
+        info "  UDP VPN   → udp/0.0.0.0:${UDP_PORT:-51820}"
+        info "  TCP proxy → tcp/0.0.0.0:${PROXY_PORT:-8388}"
+        cargo run -p vpn-server
+    ) &
+    SERVER_PID=$!
+
+    # Start web in background
+    (
+        cd "$SCRIPT_DIR/web"
+        ensure_latest_node
+        ensure_npm_deps "$SCRIPT_DIR/web"
+        export NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://localhost:${API_PORT:-8080}}"
+        info "Web running at http://localhost:${WEB_PORT:-3000}"
+        npm run dev -- --port "${WEB_PORT:-3000}"
+    ) &
     WEB_PID=$!
 
     info "Started server (PID: $SERVER_PID) and web (PID: $WEB_PID)."
     info "Press Ctrl+C to stop both services."
 
-    trap "kill $SERVER_PID $WEB_PID 2>/dev/null || true; exit" INT TERM
-    wait -n $SERVER_PID $WEB_PID
+    cleanup() {
+        warn "Shutting down all services..."
+        kill "$SERVER_PID" "$WEB_PID" 2>/dev/null || true
+        # Kill any child processes of the sub-shells too
+        pkill -TERM -P "$SERVER_PID" 2>/dev/null || true
+        pkill -TERM -P "$WEB_PID" 2>/dev/null || true
+        wait "$SERVER_PID" "$WEB_PID" 2>/dev/null || true
+        exit 0
+    }
+    trap cleanup INT TERM
 
-    warn "One of the services stopped. Shutting down the other one..."
-    kill $SERVER_PID $WEB_PID 2>/dev/null || true
-    wait $SERVER_PID $WEB_PID 2>/dev/null || true
+    # Wait for both — if either exits, kill the other and exit
+    wait "$SERVER_PID" || true
+    warn "Server process stopped. Shutting down web..."
+    kill "$WEB_PID" 2>/dev/null || true
+    wait "$WEB_PID" 2>/dev/null || true
 }
 
 # ── Argument parsing ──────────────────────────────────────────────────────────

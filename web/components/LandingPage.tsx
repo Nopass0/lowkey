@@ -67,8 +67,8 @@ export default function LandingPage() {
         <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
           <Link href="/" className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg flex items-center justify-center"
-              style={{ background: 'linear-gradient(135deg,#00ff88,#0066ff)' }}>
-              <Shield className="w-4 h-4 text-black" />
+              style={{ background: 'linear-gradient(135deg,#3b82f6,#2563eb)' }}>
+              <Shield className="w-4 h-4 text-white" />
             </div>
             <span className="font-bold text-lg gradient-text">Lowkey VPN</span>
           </Link>
@@ -80,7 +80,7 @@ export default function LandingPage() {
           </div>
           <div className="flex items-center gap-3">
             <Link href="/auth/login"    className="btn btn-secondary text-sm">Войти</Link>
-            <Link href="/auth/register" className="btn btn-primary text-sm glow-green">Начать</Link>
+            <Link href="/auth/register" className="btn btn-primary text-sm glow-blue">Начать</Link>
           </div>
         </div>
       </nav>
@@ -90,7 +90,7 @@ export default function LandingPage() {
         {/* Background orbs */}
         <div className="absolute inset-0 pointer-events-none">
           <div className="absolute top-20 left-1/4 w-[500px] h-[500px] rounded-full blur-3xl opacity-8"
-            style={{ background: 'radial-gradient(circle,#00ff88,transparent)' }} />
+            style={{ background: 'radial-gradient(circle,#3b82f6,transparent)' }} />
           <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] rounded-full blur-3xl opacity-6"
             style={{ background: 'radial-gradient(circle,#0066ff,transparent)' }} />
         </div>
@@ -99,7 +99,7 @@ export default function LandingPage() {
           <motion.div initial="hidden" animate="visible" variants={stagger}>
             <motion.div variants={fadeUp}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium mb-6"
-              style={{ background: 'rgba(0,255,136,0.1)', border: '1px solid rgba(0,255,136,0.3)', color: '#00ff88' }}>
+              style={{ background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.3)', color: '#60a5fa' }}>
               <Wifi className="w-4 h-4" />
               QUIC · Hysteria2 · AES-256
             </motion.div>
@@ -119,7 +119,7 @@ export default function LandingPage() {
 
             <motion.div variants={fadeUp} className="flex flex-col sm:flex-row gap-4 justify-center">
               <Link href="/auth/register"
-                className="btn btn-primary px-8 py-4 text-lg glow-green flex items-center gap-2">
+                className="btn btn-primary px-8 py-4 text-lg glow-blue flex items-center gap-2">
                 Попробовать бесплатно
                 <ArrowRight className="w-5 h-5" />
               </Link>
@@ -163,8 +163,8 @@ export default function LandingPage() {
                 <motion.div key={f.title} variants={fadeUp}
                   className="glass rounded-2xl p-6 card-hover">
                   <div className="w-12 h-12 rounded-xl mb-4 flex items-center justify-center"
-                    style={{ background: 'rgba(0,255,136,0.1)' }}>
-                    <f.icon className="w-6 h-6" style={{ color: '#00ff88' }} />
+                    style={{ background: 'rgba(59,130,246,0.08)' }}>
+                    <f.icon className="w-6 h-6" style={{ color: '#60a5fa' }} />
                   </div>
                   <h3 className="font-bold text-lg mb-2">{f.title}</h3>
                   <p className="text-sm leading-relaxed" style={{ color: 'var(--muted-foreground)' }}>{f.desc}</p>
@@ -188,11 +188,11 @@ export default function LandingPage() {
                 <motion.div key={step.num} variants={fadeUp} className="text-center">
                   <div className="text-5xl font-black mb-4 gradient-text opacity-30">{step.num}</div>
                   <div className="w-12 h-12 rounded-full mx-auto mb-4 flex items-center justify-center"
-                    style={{ background: 'rgba(0,255,136,0.1)', border: '2px solid rgba(0,255,136,0.3)' }}>
-                    {i === 0 && <Download className="w-5 h-5" style={{ color: '#00ff88' }} />}
-                    {i === 1 && <Users    className="w-5 h-5" style={{ color: '#00ff88' }} />}
-                    {i === 2 && <Award    className="w-5 h-5" style={{ color: '#00ff88' }} />}
-                    {i === 3 && <Wifi     className="w-5 h-5" style={{ color: '#00ff88' }} />}
+                    style={{ background: 'rgba(59,130,246,0.08)', border: '2px solid rgba(59,130,246,0.25)' }}>
+                    {i === 0 && <Download className="w-5 h-5" style={{ color: '#60a5fa' }} />}
+                    {i === 1 && <Users    className="w-5 h-5" style={{ color: '#60a5fa' }} />}
+                    {i === 2 && <Award    className="w-5 h-5" style={{ color: '#60a5fa' }} />}
+                    {i === 3 && <Wifi     className="w-5 h-5" style={{ color: '#60a5fa' }} />}
                   </div>
                   <h3 className="font-bold mb-2">{step.title}</h3>
                   <p className="text-sm" style={{ color: 'var(--muted-foreground)' }}>{step.desc}</p>
@@ -261,7 +261,7 @@ export default function LandingPage() {
                       <div className="text-right">
                         <div className="font-bold gradient-text">{p.price_rub.toFixed(0)} ₽</div>
                         {p.discount_pct && p.discount_pct > 0 && (
-                          <div className="text-xs" style={{ color: '#00ff88' }}>−{p.discount_pct}%</div>
+                          <div className="text-xs" style={{ color: '#60a5fa' }}>−{p.discount_pct}%</div>
                         )}
                       </div>
                     </Link>
@@ -294,14 +294,14 @@ export default function LandingPage() {
                     href={r?.download_url || `/downloads`}
                     className="glass rounded-2xl p-6 card-hover flex flex-col items-center text-center gap-4">
                     <div className="w-16 h-16 rounded-2xl flex items-center justify-center"
-                      style={{ background: 'rgba(0,255,136,0.1)', color: '#00ff88' }}>
+                      style={{ background: 'rgba(59,130,246,0.08)', color: '#60a5fa' }}>
                       {icon}
                     </div>
                     <div>
                       <div className="font-bold text-lg">{label}</div>
                       <div className="text-sm" style={{ color: 'var(--muted-foreground)' }}>{sub}</div>
                       {r && (
-                        <div className="text-xs mt-1" style={{ color: '#00ff88' }}>v{r.version}</div>
+                        <div className="text-xs mt-1" style={{ color: '#60a5fa' }}>v{r.version}</div>
                       )}
                     </div>
                     <div className="btn btn-primary w-full flex items-center justify-center gap-2 mt-auto">
@@ -318,14 +318,14 @@ export default function LandingPage() {
               <h3 className="font-bold mb-4">Быстрая установка</h3>
               <div className="space-y-4">
                 <div>
-                  <div className="text-sm font-medium mb-2" style={{ color: '#00ff88' }}>Linux (CLI)</div>
+                  <div className="text-sm font-medium mb-2" style={{ color: '#60a5fa' }}>Linux (CLI)</div>
                   <code className="block p-3 rounded-xl text-sm font-mono overflow-x-auto"
                     style={{ background: 'rgba(0,0,0,0.4)', color: 'var(--muted-foreground)' }}>
                     curl -fsSL https://get.lowkeyvpn.com/linux | sudo bash
                   </code>
                 </div>
                 <div>
-                  <div className="text-sm font-medium mb-2" style={{ color: '#00ff88' }}>Windows (PowerShell)</div>
+                  <div className="text-sm font-medium mb-2" style={{ color: '#60a5fa' }}>Windows (PowerShell)</div>
                   <code className="block p-3 rounded-xl text-sm font-mono overflow-x-auto"
                     style={{ background: 'rgba(0,0,0,0.4)', color: 'var(--muted-foreground)' }}>
                     irm https://get.lowkeyvpn.com/windows | iex
@@ -384,7 +384,7 @@ export default function LandingPage() {
               Регистрация за 30 секунд. Оплата через СБП. Никаких карт.
             </motion.p>
             <motion.div variants={fadeUp} className="flex flex-col sm:flex-row gap-4 justify-center">
-              <Link href="/auth/register" className="btn btn-primary px-8 py-4 text-lg glow-green">
+              <Link href="/auth/register" className="btn btn-primary px-8 py-4 text-lg glow-blue">
                 Создать аккаунт бесплатно
               </Link>
               <Link href="/downloads" className="btn btn-secondary px-8 py-4 text-lg">
@@ -400,8 +400,8 @@ export default function LandingPage() {
         <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 rounded flex items-center justify-center"
-              style={{ background: 'linear-gradient(135deg,#00ff88,#0066ff)' }}>
-              <Shield className="w-3 h-3 text-black" />
+              style={{ background: 'linear-gradient(135deg,#3b82f6,#2563eb)' }}>
+              <Shield className="w-3 h-3 text-white" />
             </div>
             <span className="font-bold gradient-text">Lowkey VPN</span>
           </div>
@@ -424,10 +424,10 @@ function PlanCard({ name, price, speed, days, popular }: {
 }) {
   const perks = [`${speed}`, `${days} дней`, 'СБП оплата', 'Без логов', 'Все протоколы'];
   return (
-    <div className={`glass rounded-2xl p-6 flex flex-col relative ${popular ? 'ring-2 ring-green-400/40' : ''}`}>
+    <div className={`glass rounded-2xl p-6 flex flex-col relative ${popular ? 'ring-2 ring-blue-400/40' : ''}`}>
       {popular && (
-        <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full text-xs font-bold text-black"
-          style={{ background: 'linear-gradient(135deg,#00ff88,#0066ff)' }}>
+        <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full text-xs font-bold text-white"
+          style={{ background: 'linear-gradient(135deg,#3b82f6,#2563eb)' }}>
           Популярный
         </div>
       )}
@@ -442,12 +442,12 @@ function PlanCard({ name, price, speed, days, popular }: {
       <ul className="space-y-2.5 mb-8 flex-1">
         {perks.map(p => (
           <li key={p} className="flex items-center gap-2 text-sm">
-            <Check className="w-4 h-4 flex-shrink-0" style={{ color: '#00ff88' }} />
+            <Check className="w-4 h-4 flex-shrink-0" style={{ color: '#60a5fa' }} />
             <span>{p}</span>
           </li>
         ))}
       </ul>
-      <Link href="/auth/register" className={`btn text-center py-3 ${popular ? 'btn-primary glow-green' : 'btn-secondary'}`}>
+      <Link href="/auth/register" className={`btn text-center py-3 ${popular ? 'btn-primary glow-blue' : 'btn-secondary'}`}>
         Начать
       </Link>
     </div>
