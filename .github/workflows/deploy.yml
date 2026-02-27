@@ -1,0 +1,141 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  SERVER_HOST: 89.169.54.87
+  SERVER_USER: root
+  DEPLOY_DIR: /opt/lowkey
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install sshpass
+        run: sudo apt-get install -y sshpass
+
+      - name: Bootstrap SSH key on server (idempotent)
+        run: |
+          # Add our deploy key to authorized_keys using password auth (first-time setup)
+          PUB_KEY=$(echo "${{ secrets.SSH_PRIVATE_KEY }}" | ssh-keygen -y -f /dev/stdin 2>/dev/null || true)
+          if [ -n "$PUB_KEY" ]; then
+            sshpass -p "${{ secrets.SERVER_PASSWORD }}" \
+              ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+              ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
+              "mkdir -p ~/.ssh; grep -qF '$PUB_KEY' ~/.ssh/authorized_keys 2>/dev/null || echo '$PUB_KEY' >> ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; echo 'SSH key OK'"
+          fi
+
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ env.SERVER_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Stop and remove old deployment
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} '
+            if [ -d /opt/lowkey ]; then
+              cd /opt/lowkey
+              docker compose down --remove-orphans 2>/dev/null || true
+            fi
+            rm -rf /opt/lowkey
+            mkdir -p /opt/lowkey
+          '
+
+      - name: Clone fresh code
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
+            'git clone --depth=1 https://github.com/Nopass0/lowkey.git /opt/lowkey'
+
+      - name: Write .env file on server
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          VPN_PSK: ${{ secrets.VPN_PSK }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          TOCHKA_JWT: ${{ secrets.TOCHKA_JWT }}
+          TOCHKA_MERCHANT_ID: ${{ secrets.TOCHKA_MERCHANT_ID }}
+          TOCHKA_LEGAL_ID: ${{ secrets.TOCHKA_LEGAL_ID }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
+        run: |
+          cat > /tmp/deploy.env << EOF
+          DATABASE_URL=${DATABASE_URL}
+          JWT_SECRET=${JWT_SECRET}
+          VPN_PSK=${VPN_PSK}
+          POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+          API_PORT=8080
+          UDP_PORT=51820
+          PROXY_PORT=8388
+          NEXT_PUBLIC_API_URL=http://${{ env.SERVER_HOST }}:8080
+          TOCHKA_JWT=${TOCHKA_JWT}
+          TOCHKA_MERCHANT_ID=${TOCHKA_MERCHANT_ID}
+          TOCHKA_LEGAL_ID=${TOCHKA_LEGAL_ID}
+          TG_BOT_TOKEN=${TG_BOT_TOKEN}
+          TG_ADMIN_CHAT_ID=${TG_ADMIN_CHAT_ID}
+          EOF
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            /tmp/deploy.env \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}:/opt/lowkey/.env
+
+      - name: Install Docker if needed
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
+            'command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh && systemctl enable --now docker)'
+
+      - name: Build and start Docker Compose services
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
+            'cd /opt/lowkey && docker compose up -d --build --remove-orphans 2>&1 | tail -20'
+
+      - name: Wait for services and verify
+        run: |
+          echo "Waiting 30s for services to start..."
+          sleep 30
+
+          echo "=== Docker service status ==="
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
+            'cd /opt/lowkey && docker compose ps'
+
+          echo "=== API health check ==="
+          for i in $(seq 1 12); do
+            if curl -sf "http://${{ env.SERVER_HOST }}:8080/subscription/plans" > /dev/null 2>&1; then
+              echo "✅ API is up at http://${{ env.SERVER_HOST }}:8080"
+              break
+            fi
+            echo "Attempt $i/12: API not ready yet, waiting 5s..."
+            sleep 5
+          done
+
+          echo "=== Web health check ==="
+          for i in $(seq 1 12); do
+            if curl -sf "http://${{ env.SERVER_HOST }}:3000" > /dev/null 2>&1; then
+              echo "✅ Web is up at http://${{ env.SERVER_HOST }}:3000"
+              break
+            fi
+            echo "Attempt $i/12: Web not ready yet, waiting 5s..."
+            sleep 5
+          done
+
+          echo ""
+          echo "=== Deployment Summary ==="
+          echo "API: http://${{ env.SERVER_HOST }}:8080"
+          echo "Web: http://${{ env.SERVER_HOST }}:3000"
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
+            'cd /opt/lowkey && docker compose ps'

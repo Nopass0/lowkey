@@ -59,6 +59,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // ── Session storage ───────────────────────────────────────────────────────────
 
+/// Server IP baked in at build time via `LOWKEY_SERVER_IP` env var.
+/// Defaults to the production server if the env var is not set.
+const BAKED_SERVER_IP: &str = match option_env!("LOWKEY_SERVER_IP") {
+    Some(s) if !s.is_empty() => s,
+    _ => "89.169.54.87",
+};
+
 /// Persisted client session — saved after login, loaded before each command.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 struct Session {
@@ -70,13 +77,33 @@ struct Session {
     api_port: Option<u16>,
 }
 
-/// Return the path to the session file: `~/.config/lowkey/session.json`.
+/// Return the path to the session file.
+///
+/// - Linux/macOS: `~/.config/lowkey/session.json`  (`$HOME`)
+/// - Windows:     `%APPDATA%\lowkey\session.json`   (`$APPDATA`)
+///
+/// Falls back to the current directory if no suitable env var is found.
 fn session_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    std::path::PathBuf::from(home)
-        .join(".config")
-        .join("lowkey")
-        .join("session.json")
+    // Windows uses APPDATA (C:\Users\<name>\AppData\Roaming)
+    #[cfg(windows)]
+    {
+        let base = std::env::var("APPDATA")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".into());
+        return std::path::PathBuf::from(base)
+            .join("lowkey")
+            .join("session.json");
+    }
+
+    // Unix: honour $HOME (or fall back to ".")
+    #[allow(unreachable_code)]
+    {
+        let _home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        std::path::PathBuf::from(_home)
+            .join(".config")
+            .join("lowkey")
+            .join("session.json")
+    }
 }
 
 /// Load the session from disk.  Returns a default (empty) session if the
@@ -432,7 +459,9 @@ async fn handle_sub(cmd: SubCmd) -> Result<()> {
     match cmd {
         SubCmd::Plans { server, api_port } => {
             let s = load_session();
-            let srv = server.or(s.server).context("--server required")?;
+            let srv = server
+                .or(s.server)
+                .unwrap_or_else(|| BAKED_SERVER_IP.to_string());
             // Plans endpoint is public — no token needed
             let resp: serde_json::Value = api_http_client()?
                 .get(format!("http://{}:{}/subscription/plans", srv, api_port))
@@ -448,7 +477,9 @@ async fn handle_sub(cmd: SubCmd) -> Result<()> {
             plan,
         } => {
             let s = load_session();
-            let srv = server.or(s.server.clone()).context("--server required")?;
+            let srv = server
+                .or(s.server.clone())
+                .unwrap_or_else(|| BAKED_SERVER_IP.to_string());
             let tok = s.token.context("Not logged in")?;
             let resp = api_post(
                 &srv,
@@ -465,7 +496,9 @@ async fn handle_sub(cmd: SubCmd) -> Result<()> {
         }
         SubCmd::Status { server, api_port } => {
             let s = load_session();
-            let srv = server.or(s.server).context("--server required")?;
+            let srv = server
+                .or(s.server)
+                .unwrap_or_else(|| BAKED_SERVER_IP.to_string());
             let tok = s.token.context("Not logged in")?;
             println!(
                 "{}",
@@ -595,6 +628,7 @@ async fn connect(
 ///   TUN/WinTUN ──► [tun→ws channel] ──► WS encrypt task ──► WebSocket
 ///   TUN/WinTUN ◄── [ws→tun channel] ◄── WS decrypt task ◄── WebSocket
 /// ```
+#[allow(unused_variables)]
 async fn run_ws_tun_mode(
     server: &str,
     api_port: u16,
@@ -687,7 +721,10 @@ async fn run_ws_tun_mode(
     ws_tun_unix(server, vpn_ip, split, tun_to_ws_tx, ws_to_tun_rx).await?;
 
     #[cfg(windows)]
-    ws_tun_windows(server, vpn_ip, tun_to_ws_tx, ws_to_tun_rx).await?;
+    {
+        let _ = split; // used only on unix via ws_tun_unix
+        ws_tun_windows(server, vpn_ip, tun_to_ws_tx, ws_to_tun_rx).await?;
+    }
 
     #[cfg(not(any(unix, windows)))]
     {

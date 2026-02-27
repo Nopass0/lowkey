@@ -111,7 +111,7 @@ function Build-Server {
 
     New-Item -ItemType Directory -Force $DistDir | Out-Null
     Copy-Item "target\release\vpn-client.exe" $DistDir
-    Write-Ok "→ dist\windows\vpn-client.exe"
+    Write-Ok "-> dist\windows\vpn-client.exe"
 }
 
 function Build-Web {
@@ -133,7 +133,7 @@ function Build-Web {
     if (Test-Path "public") {
         Copy-Item -Recurse -Force "public" "$WebDist\public"
     }
-    Write-Ok "→ dist\web\ (Next.js standalone)"
+    Write-Ok "-> dist\web\ (Next.js standalone)"
     Write-Info "Run: node dist\web\server.js"
 }
 
@@ -174,7 +174,7 @@ function Build-Desktop {
     Get-ChildItem "src-tauri\target\release\bundle" -Recurse -Include "*.msi","*.exe","*.nsis" -ErrorAction SilentlyContinue |
         ForEach-Object {
             Copy-Item $_.FullName $DesktopDist
-            Write-Ok "→ dist\desktop\$($_.Name)"
+            Write-Ok "-> dist\desktop\$($_.Name)"
         }
 }
 
