@@ -181,16 +181,8 @@ start_server() {
     load_env
 
     if [[ $EUID -ne 0 ]]; then
-        warn "VPN server needs root privileges for TUN device creation."
-        warn "Re-running with sudo..."
-        exec sudo -E env PATH="$PATH" \
-            DATABASE_URL="${DATABASE_URL:-}" \
-            JWT_SECRET="${JWT_SECRET:-}" \
-            VPN_PSK="${VPN_PSK:-}" \
-            API_PORT="${API_PORT:-8080}" \
-            UDP_PORT="${UDP_PORT:-51820}" \
-            PROXY_PORT="${PROXY_PORT:-8388}" \
-            cargo run -p vpn-server
+        warn "Running server without root privileges."
+        warn "If your setup requires TUN creation, restart with sudo:  sudo ./dev.sh --server"
     fi
 
     info "Server will listen on:"
@@ -232,24 +224,22 @@ start_desktop() {
 start_all() {
     section "Starting all services (server + web)"
 
-    if command -v tmux &>/dev/null; then
-        info "Using tmux for split-pane view."
-        tmux new-session -d -s lowkey-dev -n server \
-            "cd '$SCRIPT_DIR' && bash dev.sh --server; read"
-        tmux new-window -t lowkey-dev -n web \
-            "cd '$SCRIPT_DIR' && bash dev.sh --web; read"
-        tmux select-window -t lowkey-dev:web
-        info "Attached to tmux session 'lowkey-dev'. Switch panes with Ctrl-B + n/p."
-        tmux attach-session -t lowkey-dev
-    else
-        warn "tmux not found — starting server in background, web in foreground."
-        bash "$SCRIPT_DIR/dev.sh" --server &
-        SERVER_PID=$!
-        trap "kill $SERVER_PID 2>/dev/null; exit" INT TERM
-        sleep 2
-        bash "$SCRIPT_DIR/dev.sh" --web
-        kill $SERVER_PID 2>/dev/null || true
-    fi
+    bash "$SCRIPT_DIR/dev.sh" --server &
+    SERVER_PID=$!
+    sleep 2
+
+    bash "$SCRIPT_DIR/dev.sh" --web &
+    WEB_PID=$!
+
+    info "Started server (PID: $SERVER_PID) and web (PID: $WEB_PID)."
+    info "Press Ctrl+C to stop both services."
+
+    trap "kill $SERVER_PID $WEB_PID 2>/dev/null || true; exit" INT TERM
+    wait -n $SERVER_PID $WEB_PID
+
+    warn "One of the services stopped. Shutting down the other one..."
+    kill $SERVER_PID $WEB_PID 2>/dev/null || true
+    wait $SERVER_PID $WEB_PID 2>/dev/null || true
 }
 
 # ── Argument parsing ──────────────────────────────────────────────────────────

@@ -61,7 +61,7 @@ export default function LandingPage() {
     releases.find(r => r.platform === platform)?.download_url || '/downloads';
 
   return (
-    <div className="min-h-screen" style={{ background: 'var(--background)' }}>
+    <div className="min-h-screen w-full overflow-x-hidden" style={{ background: 'var(--background)' }}>
       {/* ── Navigation ──────────────────────────────────────────────────── */}
       <nav className="fixed top-0 inset-x-0 z-50 glass border-b" style={{ borderColor: 'var(--border)' }}>
         <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">

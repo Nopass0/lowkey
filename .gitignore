@@ -1,1 +1,8 @@
 /target/
+/vpn-desktop/src-tauri/icons/*.png
+/vpn-desktop/src-tauri/icons/*.ico
+/vpn-desktop/src-tauri/icons/*.icns
+# Tauri icons are generated from SVG at build time
+/vpn-desktop/src-tauri/icons/**
+!/vpn-desktop/src-tauri/icons/
+!/vpn-desktop/src-tauri/icons/icon.svg
