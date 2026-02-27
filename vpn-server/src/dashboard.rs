@@ -101,7 +101,9 @@ pub async fn run_dashboard(state: Shared) -> Result<()> {
                     prev.insert(key, SpeedSnap { bytes_in: cur_in, bytes_out: cur_out });
                 }
                 // Redraw the full frame
-                terminal.draw(|f| draw(f, &state))?;
+                // block_in_place lets the synchronous draw() call blocking_read()
+                // on tokio RwLocks without panicking inside the async runtime.
+                tokio::task::block_in_place(|| terminal.draw(|f| draw(f, &state)))?;
             }
 
             // ── Keyboard events ───────────────────────────────────────────────

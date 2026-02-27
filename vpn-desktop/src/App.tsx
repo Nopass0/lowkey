@@ -15,8 +15,13 @@ interface ReleaseInfo {
 }
 
 export default function App() {
-  const { token, setUser, apiUrl } = useStore();
+  const { token, setUser, apiUrl, applyBakedServerIp } = useStore();
   const [updateInfo, setUpdateInfo] = useState<ReleaseInfo | null>(null);
+
+  // On first mount: apply server IP baked in at build time if still on default
+  useEffect(() => {
+    applyBakedServerIp();
+  }, []);
 
   useEffect(() => {
     if (token) {
@@ -57,7 +62,7 @@ export default function App() {
           display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
         }}>
           <div style={{
-            background: '#0d0d1f', border: '1px solid rgba(0,255,136,0.3)',
+            background: '#0d0d1f', border: '1px solid rgba(59,130,246,0.3)',
             borderRadius: 16, padding: 28, maxWidth: 360, width: '90%',
           }}>
             <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 8, color: '#f0f4ff' }}>
@@ -76,8 +81,8 @@ export default function App() {
                 onClick={() => open(updateInfo.download_url).finally(() => setUpdateInfo(null))}
                 style={{
                   flex: 1, padding: '10px 0', borderRadius: 10, border: 'none',
-                  background: 'linear-gradient(135deg,#00ff88,#0066ff)',
-                  color: '#000', fontWeight: 700, cursor: 'pointer', fontSize: 14,
+                  background: 'linear-gradient(135deg,#3b82f6,#2563eb)',
+                  color: '#fff', fontWeight: 700, cursor: 'pointer', fontSize: 14,
                 }}
               >
                 Скачать

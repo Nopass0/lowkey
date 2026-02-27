@@ -146,6 +146,17 @@ function Build-Desktop {
 
     Install-NpmDeps -TargetDir $DesktopDir
 
+    # Prompt for VPN server IP to bake into the binary as the default
+    Write-Host ""
+    Write-Warn "Enter the VPN server IP to embed as the default (e.g. 1.2.3.4)."
+    Write-Warn "Leave blank to skip — users configure it in the app settings."
+    $LowkeyServerIP = Read-Host "VPN server IP"
+    if ($LowkeyServerIP -ne "") {
+        $env:LOWKEY_SERVER_IP = $LowkeyServerIP
+        $env:VITE_API_URL = "http://${LowkeyServerIP}:8080"
+        Write-Info "Baking server IP: $LowkeyServerIP  (API URL: $($env:VITE_API_URL))"
+    }
+
     Write-Info "Running: npm run tauri:build"
     & npm run tauri:build
     if ($LASTEXITCODE -ne 0) {

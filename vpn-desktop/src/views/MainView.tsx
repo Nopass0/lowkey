@@ -108,8 +108,8 @@ export default function MainView() {
       <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: 'var(--border)' }}>
         <div className="flex items-center gap-2">
           <div className="w-6 h-6 rounded flex items-center justify-center"
-            style={{ background: 'linear-gradient(135deg, #00ff88, #0066ff)' }}>
-            <Shield className="w-3 h-3 text-black" />
+            style={{ background: 'linear-gradient(135deg, #3b82f6, #2563eb)' }}>
+            <Shield className="w-3 h-3 text-white" />
           </div>
           <span className="text-sm font-bold gradient-text">Lowkey VPN</span>
         </div>
@@ -130,7 +130,7 @@ export default function MainView() {
         ].map(t => (
           <button key={t.id} onClick={() => setActiveTab(t.id as any)}
             className={`px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors ${
-              activeTab === t.id ? 'border-green-400 text-white' : 'border-transparent'
+              activeTab === t.id ? 'border-blue-400 text-white' : 'border-transparent'
             }`}
             style={{ color: activeTab === t.id ? 'var(--text)' : 'var(--muted)' }}>
             {t.label}
@@ -153,25 +153,25 @@ export default function MainView() {
                   className="w-28 h-28 rounded-full flex items-center justify-center transition-all duration-500 relative"
                   style={{
                     background: connected
-                      ? 'radial-gradient(circle, rgba(0,255,136,0.3), rgba(0,255,136,0.1))'
+                      ? 'radial-gradient(circle, rgba(59,130,246,0.3), rgba(59,130,246,0.1))'
                       : 'radial-gradient(circle, rgba(255,68,68,0.2), rgba(255,68,68,0.05))',
-                    border: `3px solid ${connected ? '#00ff88' : 'rgba(255,68,68,0.5)'}`,
+                    border: `3px solid ${connected ? '#3b82f6' : 'rgba(255,68,68,0.5)'}`,
                     boxShadow: connected
-                      ? '0 0 40px rgba(0,255,136,0.3), inset 0 0 20px rgba(0,255,136,0.05)'
+                      ? '0 0 40px rgba(59,130,246,0.3), inset 0 0 20px rgba(59,130,246,0.05)'
                       : '0 0 20px rgba(255,68,68,0.2)',
                   }}
                 >
                   {toggling ? (
                     <div className="w-8 h-8 border-3 border-white/20 border-t-white rounded-full animate-spin" />
                   ) : connected ? (
-                    <Wifi className="w-10 h-10" style={{ color: '#00ff88' }} />
+                    <Wifi className="w-10 h-10" style={{ color: '#3b82f6' }} />
                   ) : (
                     <WifiOff className="w-10 h-10" style={{ color: '#ff4444' }} />
                   )}
                 </motion.button>
               </div>
 
-              <div className="text-lg font-bold mb-1" style={{ color: connected ? '#00ff88' : '#ff4444' }}>
+              <div className="text-lg font-bold mb-1" style={{ color: connected ? '#60a5fa' : '#ff4444' }}>
                 {toggling ? 'Подключение...' : connected ? 'Подключён' : 'Отключён'}
               </div>
               <div className="text-xs" style={{ color: 'var(--muted)' }}>
@@ -191,7 +191,7 @@ export default function MainView() {
               <div className="glass rounded-xl p-3">
                 <div className="text-xs mb-1" style={{ color: 'var(--muted)' }}>Подписка</div>
                 <div className={`font-bold text-sm ${user.sub_status === 'active' ? '' : ''}`}
-                  style={{ color: user.sub_status === 'active' ? '#00ff88' : '#ff4444' }}>
+                  style={{ color: user.sub_status === 'active' ? '#60a5fa' : '#ff4444' }}>
                   {user.sub_status === 'active' ? 'Активна' : 'Неактивна'}
                 </div>
                 {user.sub_expires_at && (
@@ -265,7 +265,7 @@ export default function MainView() {
             <div className="glass rounded-xl p-4">
               <div className="text-xs mb-2 font-medium">Ваш код</div>
               <div className="font-mono text-lg text-center py-2 rounded-lg"
-                style={{ background: 'rgba(0,255,136,0.08)', color: '#00ff88' }}>
+                style={{ background: 'rgba(59,130,246,0.08)', color: '#60a5fa' }}>
                 {refStats.referral_code}
               </div>
               <div className="text-xs mt-2" style={{ color: 'var(--muted)' }}>

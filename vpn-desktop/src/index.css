@@ -14,7 +14,7 @@
   --border: #1a1a3e;
   --text: #f0f4ff;
   --muted: #8892b0;
-  --primary: #00ff88;
+  --primary: #3b82f6;
   --danger: #ff4444;
 }
 
@@ -67,12 +67,12 @@ input:focus {
 
 .btn-primary {
   background: var(--primary);
-  color: #000;
+  color: #fff;
 }
 
 .btn-primary:hover {
   filter: brightness(1.1);
-  box-shadow: 0 0 16px rgba(0, 255, 136, 0.4);
+  box-shadow: 0 0 16px rgba(59, 130, 246, 0.4);
 }
 
 .btn-secondary {
@@ -94,7 +94,7 @@ input:focus {
 }
 
 .gradient-text {
-  background: linear-gradient(135deg, #00ff88, #0066ff);
+  background: linear-gradient(135deg, #ffffff 0%, #3b82f6 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
