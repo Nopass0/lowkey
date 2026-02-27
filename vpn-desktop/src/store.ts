@@ -32,7 +32,7 @@ export const useStore = create<AppState>()(
     (set) => ({
       token: null,
       user: null,
-      apiUrl: 'http://localhost:3001',
+      apiUrl: 'http://localhost:8080',
       connected: false,
       vpnIp: null,
 
