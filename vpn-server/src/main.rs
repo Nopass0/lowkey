@@ -355,6 +355,14 @@ async fn main() -> Result<()> {
         .route("/admin/referral/withdrawals/:id/reject",  put(referral_api::admin_reject_withdrawal))
         .route("/admin/plans",                     get(referral_api::admin_list_plans))
         .route("/admin/plans/:key/price",          put(referral_api::admin_update_plan_price))
+        // ── App release management ────────────────────────────────────────────
+        .route("/admin/releases",                  get(admin_api::list_releases))
+        .route("/admin/releases",                  post(admin_api::create_release))
+        .route("/admin/releases/:id/latest",       put(admin_api::set_release_latest))
+        .route("/admin/releases/:id",              delete(admin_api::delete_release))
+        // ── Public version check (auto-update) ────────────────────────────────
+        .route("/api/version/:platform",           get(admin_api::latest_version))
+        .route("/api/versions",                    get(admin_api::all_latest_versions))
         // ── WebSocket VPN tunnel (firewall-bypass transport) ──────────────────
         .route("/ws-tunnel", get(ws_tunnel::ws_handler))
         // CORS: allow all origins so web-based admin panels can talk to the API

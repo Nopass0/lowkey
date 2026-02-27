@@ -246,12 +246,19 @@ export const admin = {
     apiFetch(`/admin/payment/${paymentId}/confirm`, { method: 'POST', token }),
 
   createPromo: (token: string, data: {
-    code: string;
+    code?: string;
     type: string;
     value: number;
     extra?: number;
     max_uses?: number;
     expires_days?: number;
+    target_user_id?: number | null;
+    only_new_users?: boolean;
+    min_purchase_rub?: number | null;
+    second_type?: string | null;
+    second_value?: number;
+    max_uses_per_user?: number;
+    description?: string;
   }) =>
     apiFetch('/admin/promos', { method: 'POST', body: JSON.stringify(data), token }),
 
@@ -301,4 +308,44 @@ export const admin = {
       body: JSON.stringify({ price_rub: priceRub }),
       token,
     }),
+
+  releases: (token: string) =>
+    apiFetch<{ releases: AppRelease[] }>('/admin/releases', { token }),
+
+  createRelease: (token: string, data: {
+    platform: string; version: string; download_url: string;
+    file_name?: string; file_size_bytes?: number; sha256_checksum?: string;
+    changelog?: string; min_os_version?: string; set_latest?: boolean;
+  }) =>
+    apiFetch<AppRelease>('/admin/releases', { method: 'POST', body: JSON.stringify(data), token }),
+
+  setReleaseLatest: (token: string, id: number) =>
+    apiFetch(`/admin/releases/${id}/latest`, { method: 'PUT', token }),
+
+  deleteRelease: (token: string, id: number) =>
+    apiFetch(`/admin/releases/${id}`, { method: 'DELETE', token }),
+};
+
+// ── App versions (public) ─────────────────────────────────────────────────────
+
+export interface AppRelease {
+  id: number;
+  platform: string;
+  version: string;
+  is_latest: boolean;
+  download_url: string;
+  file_name: string | null;
+  file_size_bytes: number | null;
+  sha256_checksum: string | null;
+  changelog: string | null;
+  min_os_version: string | null;
+  released_at: string;
+}
+
+export const versions = {
+  latest: (platform: string) =>
+    apiFetch<AppRelease & { download_url: string }>(`/api/version/${platform}`),
+
+  all: () =>
+    apiFetch<{ releases: AppRelease[] }>('/api/versions'),
 };

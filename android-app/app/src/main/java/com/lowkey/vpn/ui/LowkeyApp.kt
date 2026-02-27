@@ -932,5 +932,60 @@ fun dayLabel(n: Int) = when {
 
 @Composable
 fun LowkeyAppWithModal(vm: MainViewModel = viewModel()) {
+    val context       = LocalContext.current
+    val updateInfo   by vm.updateAvailable.collectAsState()
+
+    // Check for updates once on first launch
+    LaunchedEffect(Unit) {
+        val versionName = try {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.0.0"
+        } catch (_: Exception) { "1.0.0" }
+        vm.checkForUpdate(versionName)
+    }
+
     LowkeyApp(vm = vm)
+
+    // Update available dialog
+    if (updateInfo != null) {
+        AlertDialog(
+            onDismissRequest = { vm.dismissUpdate() },
+            containerColor = CardColor,
+            titleContentColor = TextColor,
+            textContentColor = MutedColor,
+            title = {
+                Text("Доступно обновление v${updateInfo!!.version}", fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Установите последнюю версию для улучшений и исправлений безопасности.")
+                    if (!updateInfo!!.changelog.isNullOrBlank()) {
+                        Text(
+                            text = updateInfo!!.changelog!!,
+                            fontSize = 12.sp,
+                            lineHeight = 18.sp,
+                            color = MutedColor
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(updateInfo!!.downloadUrl))
+                        context.startActivity(intent)
+                        vm.dismissUpdate()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = GreenColor)
+                ) {
+                    Text("Скачать", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { vm.dismissUpdate() }) {
+                    Text("Позже", color = MutedColor)
+                }
+            }
+        )
+    }
 }

@@ -309,17 +309,35 @@ pub async fn apply_promo(
         }
     }
 
-    // Check global use limit
-    if promo.used_count >= promo.max_uses {
+    // Check global use limit (0 = unlimited)
+    if promo.max_uses > 0 && promo.used_count >= promo.max_uses {
         return Err(err(StatusCode::GONE, "Promo code already fully used"));
     }
 
-    // Check per-user uniqueness
-    if db::has_user_used_promo(&s.pool, claims.sub, promo.id)
+    // Check individual target restriction
+    if let Some(target_id) = promo.target_user_id {
+        if target_id != claims.sub {
+            return Err(err(StatusCode::FORBIDDEN, "This promo code is not for your account"));
+        }
+    }
+
+    // Check first-purchase restriction
+    if promo.only_new_users {
+        let user = db::find_user_by_id(&s.pool, claims.sub)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or(err(StatusCode::NOT_FOUND, "User not found"))?;
+        if user.first_purchase_done {
+            return Err(err(StatusCode::FORBIDDEN, "This promo is only for new users"));
+        }
+    }
+
+    // Check per-user use count vs max_uses_per_user
+    let user_uses = db::count_user_promo_uses(&s.pool, claims.sub, promo.id)
         .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    {
-        return Err(err(StatusCode::CONFLICT, "You already used this promo code"));
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if user_uses >= promo.max_uses_per_user as i64 {
+        return Err(err(StatusCode::CONFLICT, "You have already used this promo code the maximum number of times"));
     }
 
     // Apply effects to the user's account
@@ -327,21 +345,34 @@ pub async fn apply_promo(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Record the redemption so the user cannot apply the same code again
+    // Record the redemption
     db::record_promo_use(&s.pool, claims.sub, promo.id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Human-readable confirmation message (Russian locale)
-    let msg = match promo.r#type.as_str() {
-        "balance"   => format!("Начислено {:.2} ₽", promo.value),
-        "free_days" => format!("Добавлено {} дней VPN", promo.value as i64),
-        "speed"     => format!(
-            "Активирован VPN {:.0} Мбит/с на {} дней",
-            promo.value, promo.extra as i64
-        ),
-        "discount"  => format!("Скидка {:.0}% на следующую подписку", promo.value),
-        _           => "Промокод применён".into(),
+    // Build human-readable confirmation message
+    let primary_msg = match promo.r#type.as_str() {
+        "balance"      => format!("Начислено {:.2} ₽", promo.value),
+        "free_days"    => format!("Добавлено {} дней VPN", promo.value as i64),
+        "speed"        => format!("Активирован VPN {:.0} Мбит/с на {} дней", promo.value, promo.extra as i64),
+        "subscription" => format!("Активирована подписка на {} дней", promo.value as i64),
+        "combo"        => format!("Начислено {:.2} ₽ + добавлено {} дней VPN", promo.value, promo.extra as i64),
+        "discount"     => format!("Скидка {:.0}% на следующую подписку", promo.value),
+        _              => "Промокод применён".into(),
+    };
+    let msg = if let Some(ref st) = promo.second_type {
+        if !st.is_empty() {
+            let extra_msg = match st.as_str() {
+                "balance"   => format!(" + начислено ещё {:.2} ₽", promo.second_value),
+                "free_days" => format!(" + {} дней VPN", promo.second_value as i64),
+                _ => String::new(),
+            };
+            format!("{}{}", primary_msg, extra_msg)
+        } else {
+            primary_msg
+        }
+    } else {
+        primary_msg
     };
 
     s.push_log(format!("Promo '{}' applied by user {}", promo.code, claims.sub));

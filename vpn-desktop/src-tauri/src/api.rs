@@ -99,3 +99,17 @@ pub async fn referral_stats(api_url: &str, token: &str) -> Result<serde_json::Va
         .await?;
     Ok(res.json().await?)
 }
+
+/// Fetch the latest release info for a platform from the public API.
+pub async fn get_latest_release(api_url: &str, platform: &str) -> Result<serde_json::Value> {
+    let res = client()
+        .get(format!("{api_url}/api/version/{platform}"))
+        .send()
+        .await?;
+    let status = res.status();
+    let json: serde_json::Value = res.json().await?;
+    if !status.is_success() {
+        anyhow::bail!("No release found for {platform}");
+    }
+    Ok(json)
+}

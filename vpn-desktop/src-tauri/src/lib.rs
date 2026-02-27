@@ -156,6 +156,45 @@ async fn get_referral_stats(api_url: String, token: String) -> Result<serde_json
         .map_err(|e| e.to_string())
 }
 
+/// Check for an available app update.
+/// Returns null if no update is available or when running a debug build.
+#[tauri::command]
+async fn check_for_update(
+    api_url: String,
+    current_version: String,
+) -> Result<Option<serde_json::Value>, String> {
+    if cfg!(debug_assertions) {
+        return Ok(None);
+    }
+    let release = match api::get_latest_release(&api_url, "windows").await {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
+    };
+    let latest_version = release["version"].as_str().unwrap_or("0.0.0");
+    if compare_versions(latest_version, &current_version) > 0 {
+        Ok(Some(release))
+    } else {
+        Ok(None)
+    }
+}
+
+fn compare_versions(v1: &str, v2: &str) -> i32 {
+    let parse = |v: &str| -> Vec<u32> {
+        v.split('.').map(|p| p.parse().unwrap_or(0)).collect()
+    };
+    let p1 = parse(v1);
+    let p2 = parse(v2);
+    let len = p1.len().max(p2.len());
+    for i in 0..len {
+        let a = *p1.get(i).unwrap_or(&0);
+        let b = *p2.get(i).unwrap_or(&0);
+        if a != b {
+            return if a > b { 1 } else { -1 };
+        }
+    }
+    0
+}
+
 /// Update tray icon based on VPN state.
 fn update_tray_icon(app: &AppHandle, connected: bool) {
     if let Some(tray) = app.tray_by_id("main") {
@@ -191,6 +230,7 @@ pub fn run() {
             create_sbp_payment,
             poll_payment_status,
             get_referral_stats,
+            check_for_update,
         ])
         .setup(|app| {
             // Create system tray

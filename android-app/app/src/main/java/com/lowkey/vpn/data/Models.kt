@@ -161,6 +161,17 @@ data class VpnStatus(
     val vpnIp: String? = null
 )
 
+// ── App release / auto-update ─────────────────────────────────────────────────
+
+data class AppReleaseInfo(
+    val id: Int,
+    val version: String,
+    @SerializedName("download_url") val downloadUrl: String,
+    @SerializedName("file_name") val fileName: String?,
+    @SerializedName("changelog") val changelog: String?,
+    @SerializedName("released_at") val releasedAt: String
+)
+
 // ── Error response ────────────────────────────────────────────────────────────
 
 data class ApiError(val error: String)

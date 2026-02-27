@@ -18,7 +18,7 @@ use chrono::Utc;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tracing::info;
 
-use crate::models::{DbSubscriptionPlan, Payment, PromoCode, User, WithdrawalRequest};
+use crate::models::{AppRelease, DbSubscriptionPlan, Payment, PromoCode, User, WithdrawalRequest};
 
 // ── Connection pool ───────────────────────────────────────────────────────────
 
@@ -58,6 +58,12 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await
         .context("Migration 002 failed")?;
+
+    let sql3 = include_str!("../../migrations/003_promo_v2_releases.sql");
+    sqlx::raw_sql(sql3)
+        .execute(pool)
+        .await
+        .context("Migration 003 failed")?;
 
     // Ensure all users have referral codes
     sqlx::raw_sql(
@@ -289,15 +295,35 @@ pub async fn activate_subscription(
 /// Returns `Ok(None)` if the code does not exist.
 pub async fn find_promo(pool: &PgPool, code: &str) -> Result<Option<PromoCode>> {
     let p = sqlx::query_as::<_, PromoCode>(
-        // `type` is a non-reserved keyword in PostgreSQL but quoting it avoids
-        // any potential conflicts in future PostgreSQL versions.
-        "SELECT id, code, \"type\", value, extra, max_uses, used_count, expires_at, created_at \
+        "SELECT id, code, \"type\", value, extra, max_uses, used_count, expires_at, created_at,
+                COALESCE(target_user_id, NULL)    AS target_user_id,
+                COALESCE(only_new_users, FALSE)   AS only_new_users,
+                min_purchase_rub,
+                second_type,
+                COALESCE(second_value, 0.0)       AS second_value,
+                COALESCE(max_uses_per_user, 1)    AS max_uses_per_user,
+                description,
+                COALESCE(created_by, 'admin')     AS created_by
          FROM promo_codes WHERE code = $1",
     )
     .bind(code)
     .fetch_optional(pool)
     .await?;
     Ok(p)
+}
+
+/// Count how many times a specific user has used a given promo code.
+///
+/// Used for per-user limit enforcement when `max_uses_per_user > 1`.
+pub async fn count_user_promo_uses(pool: &PgPool, user_id: i32, promo_id: i32) -> Result<i64> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM promo_uses WHERE user_id = $1 AND promo_id = $2",
+    )
+    .bind(user_id)
+    .bind(promo_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
 }
 
 /// Check whether a specific user has already used a given promo code.
@@ -337,71 +363,35 @@ pub async fn record_promo_use(pool: &PgPool, user_id: i32, promo_id: i32) -> Res
     Ok(())
 }
 
-/// Apply the effects of a promo code to a user account.
+/// Apply the primary effects of a promo code to a user account.
 ///
-/// Effects vary by promo type:
-/// * `balance`   — adds `promo.value` rubles to the user's balance.
-/// * `free_days` — activates subscription and extends expiry by `promo.value`
-///                 days (unlimited speed).
-/// * `speed`     — activates subscription at `promo.value` Mbit/s for
-///                 `promo.extra` days.
-/// * `discount`  — no immediate effect; the discount is applied at the next
-///                 `buy_subscription` call (stub — not yet implemented).
+/// | type           | effect                                                       |
+/// |----------------|--------------------------------------------------------------|
+/// | `balance`      | Credits `value` RUB to account balance.                     |
+/// | `free_days`    | Extends subscription by `value` days at current speed.      |
+/// | `speed`        | Sets subscription speed to `value` Mbit/s for `extra` days. |
+/// | `subscription` | Grants a subscription: `value` days at `extra` Mbit/s.      |
+/// | `combo`        | Credits `value` RUB **and** extends sub by `extra` days.    |
+/// | `discount`     | No immediate DB change; applied at next purchase.           |
 ///
-/// Returns `(new_balance, new_sub_expires_at)` so the caller can return
-/// updated values to the client.
+/// Also applies `second_type`/`second_value` combo effects if set.
+///
+/// Returns `(new_balance, new_sub_expires_at)`.
 pub async fn apply_promo_effects(
     pool: &PgPool,
     user_id: i32,
     promo: &PromoCode,
 ) -> Result<(f64, Option<chrono::DateTime<Utc>>)> {
-    match promo.r#type.as_str() {
-        "balance" => {
-            // Simply credit the user's account
-            sqlx::query("UPDATE users SET balance = balance + $1 WHERE id = $2")
-                .bind(promo.value)
-                .bind(user_id)
-                .execute(pool)
-                .await?;
+    apply_single_effect(pool, user_id, &promo.r#type, promo.value, promo.extra).await?;
+
+    // Apply second/combo effect if configured
+    if let Some(ref second) = promo.second_type {
+        if !second.is_empty() {
+            apply_single_effect(pool, user_id, second, promo.second_value, 0.0).await?;
         }
-        "free_days" => {
-            // Activate subscription and extend expiry — speed is left unchanged
-            sqlx::query(
-                "UPDATE users SET \
-                   sub_status = 'active', \
-                   sub_expires_at = GREATEST(COALESCE(sub_expires_at, NOW()), NOW()) \
-                                    + ($1 || ' days')::INTERVAL, \
-                   sub_speed_mbps = CASE WHEN sub_speed_mbps = 0 THEN 0 ELSE sub_speed_mbps END \
-                 WHERE id = $2",
-            )
-            .bind((promo.value as i64).to_string())
-            .bind(user_id)
-            .execute(pool)
-            .await?;
-        }
-        "speed" => {
-            // Activate subscription at a specific speed tier for N days
-            sqlx::query(
-                "UPDATE users SET \
-                   sub_status = 'active', \
-                   sub_speed_mbps = $1, \
-                   sub_expires_at = GREATEST(COALESCE(sub_expires_at, NOW()), NOW()) \
-                                    + ($2 || ' days')::INTERVAL \
-                 WHERE id = $3",
-            )
-            .bind(promo.value)                      // Mbit/s cap
-            .bind((promo.extra as i64).to_string()) // number of days
-            .bind(user_id)
-            .execute(pool)
-            .await?;
-        }
-        "discount" => {
-            // Discount is stored and applied at purchase time — no immediate DB change
-        }
-        _ => {} // unknown type — ignore gracefully
     }
 
-    // Return the updated balance and expiry for the API response
+    // Return updated state for API response
     let row: (f64, Option<chrono::DateTime<Utc>>) = sqlx::query_as(
         "SELECT CAST(balance AS FLOAT8), sub_expires_at FROM users WHERE id = $1",
     )
@@ -412,9 +402,89 @@ pub async fn apply_promo_effects(
     Ok(row)
 }
 
+/// Apply a single promo effect (balance credit, subscription extension, etc.).
+async fn apply_single_effect(pool: &PgPool, user_id: i32, effect_type: &str, value: f64, extra: f64) -> Result<()> {
+    match effect_type {
+        "balance" => {
+            sqlx::query("UPDATE users SET balance = balance + $1 WHERE id = $2")
+                .bind(value)
+                .bind(user_id)
+                .execute(pool)
+                .await?;
+        }
+        "free_days" => {
+            sqlx::query(
+                "UPDATE users SET \
+                   sub_status = 'active', \
+                   sub_speed_mbps = CASE WHEN sub_speed_mbps = 0.0 THEN 0.0 ELSE sub_speed_mbps END, \
+                   sub_expires_at = GREATEST(COALESCE(sub_expires_at, NOW()), NOW()) \
+                                    + ($1 || ' days')::INTERVAL \
+                 WHERE id = $2",
+            )
+            .bind((value as i64).to_string())
+            .bind(user_id)
+            .execute(pool)
+            .await?;
+        }
+        "speed" => {
+            sqlx::query(
+                "UPDATE users SET \
+                   sub_status = 'active', \
+                   sub_speed_mbps = $1, \
+                   sub_expires_at = GREATEST(COALESCE(sub_expires_at, NOW()), NOW()) \
+                                    + ($2 || ' days')::INTERVAL \
+                 WHERE id = $3",
+            )
+            .bind(value)                      // Mbit/s
+            .bind((extra as i64).to_string()) // days
+            .bind(user_id)
+            .execute(pool)
+            .await?;
+        }
+        "subscription" | "combo" if effect_type == "subscription" => {
+            // Grant subscription: value=days, extra=speed (0=unlimited)
+            sqlx::query(
+                "UPDATE users SET \
+                   sub_status = 'active', \
+                   sub_speed_mbps = $1, \
+                   sub_expires_at = GREATEST(COALESCE(sub_expires_at, NOW()), NOW()) \
+                                    + ($2 || ' days')::INTERVAL \
+                 WHERE id = $3",
+            )
+            .bind(extra)                      // Mbit/s (0 = unlimited)
+            .bind((value as i64).to_string()) // days
+            .bind(user_id)
+            .execute(pool)
+            .await?;
+        }
+        "combo" => {
+            // combo: credit value RUB + extend by extra days
+            sqlx::query("UPDATE users SET balance = balance + $1 WHERE id = $2")
+                .bind(value).bind(user_id).execute(pool).await?;
+            if extra > 0.0 {
+                sqlx::query(
+                    "UPDATE users SET \
+                       sub_status = 'active', \
+                       sub_expires_at = GREATEST(COALESCE(sub_expires_at, NOW()), NOW()) \
+                                        + ($1 || ' days')::INTERVAL \
+                     WHERE id = $2",
+                )
+                .bind((extra as i64).to_string())
+                .bind(user_id)
+                .execute(pool)
+                .await?;
+            }
+        }
+        "discount" => { /* applied at purchase time, no immediate change */ }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Create a new promo code and persist it to the database.
 ///
 /// Returns the newly created [`PromoCode`] row including its auto-assigned ID.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_promo(
     pool: &PgPool,
     code: &str,
@@ -423,11 +493,29 @@ pub async fn create_promo(
     extra: f64,
     max_uses: i32,
     expires_at: Option<chrono::DateTime<Utc>>,
+    target_user_id: Option<i32>,
+    only_new_users: bool,
+    min_purchase_rub: Option<f64>,
+    second_type: Option<&str>,
+    second_value: f64,
+    max_uses_per_user: i32,
+    description: Option<&str>,
 ) -> Result<PromoCode> {
     let p = sqlx::query_as::<_, PromoCode>(
-        "INSERT INTO promo_codes (code, \"type\", value, extra, max_uses, expires_at) \
-         VALUES ($1, $2, $3, $4, $5, $6) \
-         RETURNING id, code, \"type\", value, extra, max_uses, used_count, expires_at, created_at",
+        "INSERT INTO promo_codes
+            (code, \"type\", value, extra, max_uses, expires_at,
+             target_user_id, only_new_users, min_purchase_rub,
+             second_type, second_value, max_uses_per_user, description)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         RETURNING id, code, \"type\", value, extra, max_uses, used_count, expires_at, created_at,
+                   target_user_id,
+                   COALESCE(only_new_users, FALSE)   AS only_new_users,
+                   min_purchase_rub,
+                   second_type,
+                   COALESCE(second_value, 0.0)       AS second_value,
+                   COALESCE(max_uses_per_user, 1)    AS max_uses_per_user,
+                   description,
+                   COALESCE(created_by, 'admin')     AS created_by",
     )
     .bind(code)
     .bind(promo_type)
@@ -435,9 +523,151 @@ pub async fn create_promo(
     .bind(extra)
     .bind(max_uses)
     .bind(expires_at)
+    .bind(target_user_id)
+    .bind(only_new_users)
+    .bind(min_purchase_rub)
+    .bind(second_type)
+    .bind(second_value)
+    .bind(max_uses_per_user)
+    .bind(description)
     .fetch_one(pool)
     .await?;
     Ok(p)
+}
+
+/// List all promo codes ordered by creation date (newest first).
+pub async fn list_promos(pool: &PgPool) -> Result<Vec<PromoCode>> {
+    let promos = sqlx::query_as::<_, PromoCode>(
+        "SELECT id, code, \"type\", value, extra, max_uses, used_count, expires_at, created_at,
+                target_user_id,
+                COALESCE(only_new_users, FALSE)   AS only_new_users,
+                min_purchase_rub,
+                second_type,
+                COALESCE(second_value, 0.0)       AS second_value,
+                COALESCE(max_uses_per_user, 1)    AS max_uses_per_user,
+                description,
+                COALESCE(created_by, 'admin')     AS created_by
+         FROM promo_codes ORDER BY created_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(promos)
+}
+
+// ── App release management ────────────────────────────────────────────────────
+
+/// Create a new app release record.
+pub async fn create_release(
+    pool: &PgPool,
+    platform: &str,
+    version: &str,
+    download_url: &str,
+    file_name: Option<&str>,
+    file_size_bytes: Option<i64>,
+    sha256_checksum: Option<&str>,
+    changelog: Option<&str>,
+    min_os_version: Option<&str>,
+    set_latest: bool,
+) -> Result<AppRelease> {
+    // Parse semver parts
+    let parts: Vec<i32> = version.split('.').filter_map(|p| p.parse().ok()).collect();
+    let (major, minor, patch) = (
+        parts.first().copied().unwrap_or(0),
+        parts.get(1).copied().unwrap_or(0),
+        parts.get(2).copied().unwrap_or(0),
+    );
+
+    if set_latest {
+        sqlx::query("UPDATE app_releases SET is_latest = FALSE WHERE platform = $1")
+            .bind(platform)
+            .execute(pool)
+            .await?;
+    }
+
+    let r = sqlx::query_as::<_, AppRelease>(
+        "INSERT INTO app_releases
+            (platform, version, version_major, version_minor, version_patch,
+             is_latest, download_url, file_name, file_size_bytes, sha256_checksum,
+             changelog, min_os_version)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         RETURNING *",
+    )
+    .bind(platform)
+    .bind(version)
+    .bind(major).bind(minor).bind(patch)
+    .bind(set_latest)
+    .bind(download_url)
+    .bind(file_name)
+    .bind(file_size_bytes)
+    .bind(sha256_checksum)
+    .bind(changelog)
+    .bind(min_os_version)
+    .fetch_one(pool)
+    .await?;
+    Ok(r)
+}
+
+/// List all releases for all platforms, newest first.
+pub async fn list_releases(pool: &PgPool) -> Result<Vec<AppRelease>> {
+    let rs = sqlx::query_as::<_, AppRelease>(
+        "SELECT * FROM app_releases WHERE is_active = TRUE
+         ORDER BY platform, version_major DESC, version_minor DESC, version_patch DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rs)
+}
+
+/// Get the latest release for a platform.
+pub async fn get_latest_release(pool: &PgPool, platform: &str) -> Result<Option<AppRelease>> {
+    let r = sqlx::query_as::<_, AppRelease>(
+        "SELECT * FROM app_releases WHERE platform = $1 AND is_latest = TRUE AND is_active = TRUE",
+    )
+    .bind(platform)
+    .fetch_optional(pool)
+    .await?;
+    Ok(r)
+}
+
+/// Set a release as the latest for its platform (clears previous latest).
+pub async fn set_release_latest(pool: &PgPool, release_id: i32) -> Result<()> {
+    let platform: Option<String> = sqlx::query_scalar(
+        "SELECT platform FROM app_releases WHERE id = $1",
+    )
+    .bind(release_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(p) = platform {
+        sqlx::query("UPDATE app_releases SET is_latest = FALSE WHERE platform = $1")
+            .bind(&p)
+            .execute(pool)
+            .await?;
+        sqlx::query("UPDATE app_releases SET is_latest = TRUE WHERE id = $1")
+            .bind(release_id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Soft-delete a release (mark inactive).
+pub async fn delete_release(pool: &PgPool, release_id: i32) -> Result<()> {
+    sqlx::query("UPDATE app_releases SET is_active = FALSE WHERE id = $1")
+        .bind(release_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Get latest versions for all platforms (for auto-update checks).
+pub async fn get_all_latest_releases(pool: &PgPool) -> Result<Vec<AppRelease>> {
+    let rs = sqlx::query_as::<_, AppRelease>(
+        "SELECT * FROM app_releases WHERE is_latest = TRUE AND is_active = TRUE",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rs)
 }
 
 // ── Admin OTP codes ───────────────────────────────────────────────────────────

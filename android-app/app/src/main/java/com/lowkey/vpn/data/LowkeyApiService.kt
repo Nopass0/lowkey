@@ -157,6 +157,15 @@ class LowkeyApiService(context: Context) {
     /** List the current user's withdrawal requests. */
     suspend fun getWithdrawals(): Result<WithdrawalsResponse> = get("/referral/withdrawals")
 
+    // ── App version / auto-update ─────────────────────────────────────────────
+
+    /**
+     * Fetch the latest release info for a given platform from the public API.
+     * Does not require authentication.
+     */
+    suspend fun getLatestRelease(platform: String): Result<AppReleaseInfo> =
+        get("/api/version/$platform", auth = false)
+
     // ── VPN peer registration ─────────────────────────────────────────────────
 
     /**

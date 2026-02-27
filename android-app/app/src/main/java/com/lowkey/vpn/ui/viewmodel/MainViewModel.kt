@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.lowkey.vpn.BuildConfig
+import com.lowkey.vpn.data.AppReleaseInfo
 import com.lowkey.vpn.data.LowkeyApiService
 import com.lowkey.vpn.data.PaymentItem
 import com.lowkey.vpn.data.PlanModel
@@ -55,6 +57,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _withdrawals = MutableStateFlow<List<WithdrawalModel>>(emptyList())
     val withdrawals: StateFlow<List<WithdrawalModel>> = _withdrawals
+
+    // ── Auto-update ───────────────────────────────────────────────────────────
+
+    private val _updateAvailable = MutableStateFlow<AppReleaseInfo?>(null)
+    val updateAvailable: StateFlow<AppReleaseInfo?> = _updateAvailable
 
     // ── Loading / messages ────────────────────────────────────────────────────
 
@@ -270,6 +277,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .onFailure { _error.value = it.message ?: "Ошибка вывода" }
             _isLoading.value = false
         }
+    }
+
+    // ── Auto-update ───────────────────────────────────────────────────────────
+
+    /**
+     * Check if a newer Android release is available on the server.
+     * Skipped in debug builds to avoid annoying developers.
+     */
+    fun checkForUpdate(currentVersion: String) {
+        if (BuildConfig.DEBUG) return
+        viewModelScope.launch {
+            api.getLatestRelease("android").onSuccess { release ->
+                if (compareVersions(release.version, currentVersion) > 0) {
+                    _updateAvailable.value = release
+                }
+            }
+        }
+    }
+
+    fun dismissUpdate() { _updateAvailable.value = null }
+
+    private fun compareVersions(v1: String, v2: String): Int {
+        val p1 = v1.split(".").map { it.toIntOrNull() ?: 0 }
+        val p2 = v2.split(".").map { it.toIntOrNull() ?: 0 }
+        for (i in 0 until maxOf(p1.size, p2.size)) {
+            val diff = (p1.getOrElse(i) { 0 }).compareTo(p2.getOrElse(i) { 0 })
+            if (diff != 0) return diff
+        }
+        return 0
     }
 
     // ── Misc ──────────────────────────────────────────────────────────────────

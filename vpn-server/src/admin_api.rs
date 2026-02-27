@@ -27,7 +27,7 @@ use tracing::info;
 use crate::{
     auth_middleware::{make_token, AdminUser},
     db,
-    models::{AdminVerifyRequest, CreatePromoRequest, SetLimitRequest},
+    models::{AdminVerifyRequest, CreatePromoRequest, CreateReleaseRequest, SetLimitRequest},
     state::Shared,
     telegram,
 };
@@ -134,32 +134,54 @@ pub async fn create_promo(
     AdminUser(_): AdminUser,
     Json(req): Json<CreatePromoRequest>,
 ) -> ApiResult<serde_json::Value> {
-    // Validate the promo type against the allowed set
-    let allowed_types = ["balance", "discount", "free_days", "speed"];
-    if !allowed_types.contains(&req.r#type.as_str()) {
+    // Validate promo type
+    let allowed = ["balance", "discount", "free_days", "speed", "subscription", "combo"];
+    if !allowed.contains(&req.r#type.as_str()) {
         return Err(err(
             StatusCode::BAD_REQUEST,
-            "type must be one of: balance, discount, free_days, speed",
+            "type must be one of: balance, discount, free_days, speed, subscription, combo",
         ));
     }
 
-    // Compute optional absolute expiry from "days from now"
-    let expires_at = req.expires_days.map(|d| Utc::now() + chrono::Duration::days(d));
-    let extra = req.extra.unwrap_or(0.0);
-    let max_uses = req.max_uses.unwrap_or(1);
+    // Auto-generate code if empty
+    let code = if req.code.trim().is_empty() {
+        use rand::distributions::Alphanumeric;
+        use rand::Rng;
+        rand::thread_rng()
+            .sample_iter(Alphanumeric)
+            .take(10)
+            .map(|c| (c as char).to_ascii_uppercase())
+            .collect::<String>()
+    } else {
+        req.code.trim().to_uppercase()
+    };
+
+    let expires_at    = req.expires_days.map(|d| Utc::now() + chrono::Duration::days(d));
+    let extra         = req.extra.unwrap_or(0.0);
+    // max_uses=0 → unlimited
+    let max_uses      = req.max_uses.unwrap_or(1);
+    let max_uses_per_user = req.max_uses_per_user.unwrap_or(1);
+    let only_new_users = req.only_new_users.unwrap_or(false);
+    let second_value  = req.second_value.unwrap_or(0.0);
 
     let promo = db::create_promo(
         &s.pool,
-        &req.code,
+        &code,
         &req.r#type,
         req.value,
         extra,
         max_uses,
         expires_at,
+        req.target_user_id,
+        only_new_users,
+        req.min_purchase_rub,
+        req.second_type.as_deref(),
+        second_value,
+        max_uses_per_user,
+        req.description.as_deref(),
     )
     .await
     .map_err(|e| {
-        // Translate UNIQUE constraint violation into a meaningful 409
         if e.to_string().contains("unique") || e.to_string().contains("duplicate") {
             err(StatusCode::CONFLICT, "Promo code already exists")
         } else {
@@ -169,11 +191,117 @@ pub async fn create_promo(
 
     info!("Admin created promo: {} (type={})", promo.code, promo.r#type);
     s.push_log(format!(
-        "Promo created: {} type={} value={}",
-        promo.code, promo.r#type, promo.value
+        "Promo created: {} type={} value={}{}",
+        promo.code, promo.r#type, promo.value,
+        if promo.target_user_id.is_some() { " [individual]" } else { "" }
     ));
 
     Ok(Json(serde_json::to_value(&promo).unwrap()))
+}
+
+// ── App release management ─────────────────────────────────────────────────────
+
+/// `GET /admin/releases` — list all app releases (admin only).
+pub async fn list_releases(
+    State(s): State<Shared>,
+    AdminUser(_): AdminUser,
+) -> ApiResult<serde_json::Value> {
+    let releases = db::list_releases(&s.pool)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "releases": releases })))
+}
+
+/// `POST /admin/releases` — publish a new app release (admin only).
+pub async fn create_release(
+    State(s): State<Shared>,
+    AdminUser(_): AdminUser,
+    Json(req): Json<CreateReleaseRequest>,
+) -> ApiResult<serde_json::Value> {
+    let allowed_platforms = ["windows", "linux", "android", "macos"];
+    if !allowed_platforms.contains(&req.platform.as_str()) {
+        return Err(err(StatusCode::BAD_REQUEST, "platform must be one of: windows, linux, android, macos"));
+    }
+
+    let release = db::create_release(
+        &s.pool,
+        &req.platform,
+        &req.version,
+        &req.download_url,
+        req.file_name.as_deref(),
+        req.file_size_bytes,
+        req.sha256_checksum.as_deref(),
+        req.changelog.as_deref(),
+        req.min_os_version.as_deref(),
+        req.set_latest.unwrap_or(true),
+    )
+    .await
+    .map_err(|e| {
+        if e.to_string().contains("unique") || e.to_string().contains("duplicate") {
+            err(StatusCode::CONFLICT, "Version already exists for this platform")
+        } else {
+            err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
+    })?;
+
+    info!("Admin published release: {} v{}", release.platform, release.version);
+    s.push_log(format!("Release published: {} v{}", release.platform, release.version));
+    Ok(Json(serde_json::to_value(&release).unwrap()))
+}
+
+/// `PUT /admin/releases/:id/latest` — mark a release as latest for its platform.
+pub async fn set_release_latest(
+    State(s): State<Shared>,
+    AdminUser(_): AdminUser,
+    axum::extract::Path(release_id): axum::extract::Path<i32>,
+) -> ApiResult<serde_json::Value> {
+    db::set_release_latest(&s.pool, release_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "ok" })))
+}
+
+/// `DELETE /admin/releases/:id` — soft-delete a release.
+pub async fn delete_release(
+    State(s): State<Shared>,
+    AdminUser(_): AdminUser,
+    axum::extract::Path(release_id): axum::extract::Path<i32>,
+) -> ApiResult<serde_json::Value> {
+    db::delete_release(&s.pool, release_id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "deleted" })))
+}
+
+/// `GET /api/version/:platform` — latest version info for auto-update (public).
+pub async fn latest_version(
+    State(s): State<Shared>,
+    axum::extract::Path(platform): axum::extract::Path<String>,
+) -> ApiResult<serde_json::Value> {
+    match db::get_latest_release(&s.pool, &platform).await {
+        Ok(Some(r)) => Ok(Json(serde_json::json!({
+            "platform": r.platform,
+            "version":  r.version,
+            "download_url": r.download_url,
+            "file_name":    r.file_name,
+            "file_size_bytes": r.file_size_bytes,
+            "sha256":       r.sha256_checksum,
+            "changelog":    r.changelog,
+            "released_at":  r.released_at,
+        }))),
+        Ok(None) => Err(err(StatusCode::NOT_FOUND, "No release found for this platform")),
+        Err(e)   => Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+/// `GET /api/versions` — latest versions for all platforms (for downloads page).
+pub async fn all_latest_versions(
+    State(s): State<Shared>,
+) -> ApiResult<serde_json::Value> {
+    let releases = db::get_all_latest_releases(&s.pool)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "releases": releases })))
 }
 
 // ── User management ───────────────────────────────────────────────────────────
@@ -241,14 +369,9 @@ pub async fn list_promos(
     State(s): State<Shared>,
     AdminUser(_): AdminUser,
 ) -> ApiResult<serde_json::Value> {
-    let promos = sqlx::query_as::<_, crate::models::PromoCode>(
-        "SELECT id, code, \"type\", value, extra, max_uses, used_count, expires_at, created_at \
-         FROM promo_codes ORDER BY created_at DESC",
-    )
-    .fetch_all(&s.pool)
-    .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
+    let promos = db::list_promos(&s.pool)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(serde_json::json!({ "promos": promos })))
 }
 
