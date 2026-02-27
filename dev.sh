@@ -91,6 +91,23 @@ check_deps() {
     }
 }
 
+install_npm_deps() {
+    local target_dir="$1"
+    cd "$target_dir"
+
+    if [[ -f package-lock.json ]]; then
+        info "Installing dependencies via npm ci in $(basename "$target_dir")..."
+        if npm ci --legacy-peer-deps; then
+            return 0
+        fi
+        warn "npm ci failed in $(basename "$target_dir"), retrying with npm install..."
+    else
+        warn "package-lock.json not found in $(basename "$target_dir"), using npm install..."
+    fi
+
+    npm install --legacy-peer-deps
+}
+
 # ── Install all development dependencies ─────────────────────────────────────
 
 setup_dev() {
@@ -118,14 +135,12 @@ setup_dev() {
 
     # Web dependencies
     section "Installing web dependencies"
-    cd "$SCRIPT_DIR/web"
-    npm install --legacy-peer-deps
+    install_npm_deps "$SCRIPT_DIR/web"
     ok "Web deps installed."
 
     # Desktop dependencies
     section "Installing desktop dependencies"
-    cd "$SCRIPT_DIR/vpn-desktop"
-    npm install --legacy-peer-deps
+    install_npm_deps "$SCRIPT_DIR/vpn-desktop"
     ok "Desktop deps installed."
 
     # Create .env if missing
@@ -192,10 +207,7 @@ start_web() {
     section "Starting Next.js web (dev mode)"
     cd "$SCRIPT_DIR/web"
 
-    if [[ ! -d node_modules ]]; then
-        info "Installing web dependencies..."
-        npm install --legacy-peer-deps
-    fi
+    install_npm_deps "$SCRIPT_DIR/web"
 
     export NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://localhost:${API_PORT:-8080}}"
     info "Web running at http://localhost:3000"
@@ -209,10 +221,7 @@ start_desktop() {
     section "Starting Tauri desktop (dev mode)"
     cd "$SCRIPT_DIR/vpn-desktop"
 
-    if [[ ! -d node_modules ]]; then
-        info "Installing desktop dependencies..."
-        npm install --legacy-peer-deps
-    fi
+    install_npm_deps "$SCRIPT_DIR/vpn-desktop"
 
     info "Starting Tauri in development mode..."
     npm run tauri:dev
