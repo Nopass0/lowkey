@@ -49,6 +49,8 @@ ENV_FILE="$SCRIPT_DIR/.env"
 # Cargo workspace puts the binary in the workspace root target/, not the crate's target/
 BINARY="$SCRIPT_DIR/target/release/vpn-server"
 PID_FILE="$SCRIPT_DIR/vpn-server.pid"
+WEB_PID_FILE="$SCRIPT_DIR/lowkey-web.pid"
+WEB_LOG_FILE="$SCRIPT_DIR/lowkey-web.log"
 
 # ── Parse CLI flags ───────────────────────────────────────────────────────────
 MODE="setup"   # setup | run | build | stop | status
@@ -83,6 +85,15 @@ if [[ "$MODE" == "stop" ]]; then
         fi
     else
         warn "No PID file found at $PID_FILE. Is the server running?"
+    fi
+
+    if [[ -f "$WEB_PID_FILE" ]]; then
+        WEB_PID=$(cat "$WEB_PID_FILE")
+        if kill -0 "$WEB_PID" 2>/dev/null; then
+            kill "$WEB_PID"
+            ok "Web server (PID $WEB_PID) stopped."
+        fi
+        rm -f "$WEB_PID_FILE"
     fi
     exit 0
 fi
@@ -143,7 +154,8 @@ install_packages_apt() {
     apt-get install -y --no-install-recommends \
         build-essential curl git ca-certificates \
         postgresql postgresql-client \
-        iproute2 iptables
+        iproute2 iptables nginx certbot python3-certbot-nginx \
+        nodejs npm
     ok "APT packages installed."
 }
 
@@ -151,7 +163,7 @@ install_packages_yum() {
     yum install -y \
         gcc make curl git ca-certificates \
         postgresql-server postgresql \
-        iproute iptables
+        iproute iptables nginx certbot python3-certbot-nginx nodejs npm
     ok "YUM packages installed."
 }
 
@@ -159,7 +171,7 @@ install_packages_dnf() {
     dnf install -y \
         gcc make curl git ca-certificates \
         postgresql-server postgresql \
-        iproute iptables
+        iproute iptables nginx certbot python3-certbot-nginx nodejs npm
     ok "DNF packages installed."
 }
 
@@ -176,6 +188,104 @@ else
     warn "Unknown package manager. Skipping system package installation."
     warn "Make sure build-essential, postgresql, iproute2, and iptables are installed."
 fi
+
+install_npm_deps() {
+    local dir="$1"
+    cd "$dir"
+    if [[ -f package-lock.json ]]; then
+        info "Installing web dependencies via npm ci..."
+        if npm ci --legacy-peer-deps; then
+            return 0
+        fi
+        warn "npm ci failed, falling back to npm install..."
+    else
+        warn "package-lock.json not found in $dir, using npm install..."
+    fi
+    npm install --legacy-peer-deps
+}
+
+build_web_app() {
+    if [[ "${ENABLE_WEB:-false}" != "true" ]]; then
+        return 0
+    fi
+    section "Building Next.js web app"
+    local web_dir="$SCRIPT_DIR/web"
+    if [[ ! -d "$web_dir" ]]; then
+        warn "web/ directory not found, skipping web setup."
+        return 0
+    fi
+    if ! command -v node &>/dev/null || ! command -v npm &>/dev/null; then
+        warn "Node.js/npm not found, skipping web setup."
+        return 0
+    fi
+    install_npm_deps "$web_dir"
+    NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://127.0.0.1:${API_PORT:-8080}}" npm run build --prefix "$web_dir"
+}
+
+start_web_app() {
+    if [[ "${ENABLE_WEB:-false}" != "true" ]]; then
+        return 0
+    fi
+    local web_dir="$SCRIPT_DIR/web"
+    local web_port="${WEB_PORT:-3000}"
+    if [[ ! -f "$web_dir/.next/standalone/server.js" ]]; then
+        warn "Web standalone build not found, skipping web launch."
+        return 0
+    fi
+    if [[ -f "$WEB_PID_FILE" ]]; then
+        local old_pid
+        old_pid=$(cat "$WEB_PID_FILE")
+        kill "$old_pid" 2>/dev/null || true
+        rm -f "$WEB_PID_FILE"
+    fi
+    info "Starting web server on port ${web_port}..."
+    nohup env PORT="$web_port" HOSTNAME="0.0.0.0"         NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://127.0.0.1:${API_PORT:-8080}}"         node "$web_dir/.next/standalone/server.js" >> "$WEB_LOG_FILE" 2>&1 &
+    echo $! > "$WEB_PID_FILE"
+    ok "Web server started with PID $(cat "$WEB_PID_FILE")"
+}
+
+configure_nginx() {
+    if [[ -z "${APP_DOMAIN:-}" ]]; then
+        return 0
+    fi
+    section "Configuring Nginx reverse proxy"
+    cat > /etc/nginx/sites-available/lowkey.conf <<NGINXEOF
+server {
+    listen 80;
+    server_name ${APP_DOMAIN};
+
+    location / {
+        proxy_pass http://127.0.0.1:${WEB_PORT:-3000};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:${API_PORT:-8080};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+NGINXEOF
+
+    ln -sfn /etc/nginx/sites-available/lowkey.conf /etc/nginx/sites-enabled/lowkey.conf
+    rm -f /etc/nginx/sites-enabled/default
+    nginx -t && systemctl restart nginx && systemctl enable nginx >/dev/null 2>&1 || warn "Failed to restart nginx"
+
+    if [[ "${SSL_MODE:-none}" == "letsencrypt" ]]; then
+        if command -v certbot &>/dev/null; then
+            certbot --nginx -d "${APP_DOMAIN}" --non-interactive --agree-tos -m "${LETSENCRYPT_EMAIL:-admin@${APP_DOMAIN}}" --redirect || warn "Certbot failed"
+        else
+            warn "certbot not installed; SSL skipped."
+        fi
+    elif [[ "${SSL_MODE:-existing}" == "existing" && -n "${SSL_CERT_PATH:-}" && -n "${SSL_KEY_PATH:-}" ]]; then
+        warn "Existing cert mode selected. Place SSL directives manually in /etc/nginx/sites-available/lowkey.conf"
+    fi
+}
 
 # =============================================================================
 # 3. RUST TOOLCHAIN
@@ -294,6 +404,34 @@ if [[ ! -f "$ENV_FILE" ]]; then
     read -rp "  TOCHKA_MERCHANT_ID: " TOCHKA_MERCHANT_ID
     read -rp "  TOCHKA_LEGAL_ID: " TOCHKA_LEGAL_ID
 
+    echo ""
+    echo -e "${BLU}Web/Nginx setup (optional)${RST}"
+    read -rp "  Setup and run web dashboard too? [Y/n]: " ENABLE_WEB_IN
+    if [[ -z "$ENABLE_WEB_IN" || "$ENABLE_WEB_IN" =~ ^[Yy]$ ]]; then
+        ENABLE_WEB=true
+    else
+        ENABLE_WEB=false
+    fi
+
+    if [[ "$ENABLE_WEB" == "true" ]]; then
+        read -rp "  WEB_PORT [3000]: " WEB_PORT
+        WEB_PORT="${WEB_PORT:-3000}"
+        read -rp "  Domain for nginx (leave blank to skip nginx): " APP_DOMAIN
+        read -rp "  NEXT_PUBLIC_API_URL [http://127.0.0.1:${API_PORT}]: " NEXT_PUBLIC_API_URL
+        NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://127.0.0.1:${API_PORT}}"
+        if [[ -n "$APP_DOMAIN" ]]; then
+            read -rp "  SSL mode [letsencrypt/existing/none] (default: letsencrypt): " SSL_MODE
+            SSL_MODE="${SSL_MODE:-letsencrypt}"
+            if [[ "$SSL_MODE" == "letsencrypt" ]]; then
+                read -rp "  Let's Encrypt email [admin@${APP_DOMAIN}]: " LETSENCRYPT_EMAIL
+                LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-admin@${APP_DOMAIN}}"
+            elif [[ "$SSL_MODE" == "existing" ]]; then
+                read -rp "  SSL cert path: " SSL_CERT_PATH
+                read -rp "  SSL key path: " SSL_KEY_PATH
+            fi
+        fi
+    fi
+
     # ── Write .env ──────────────────────────────────────────────────────────
     cat > "$ENV_FILE" <<ENVEOF
 # Lowkey VPN Server — environment configuration
@@ -309,6 +447,15 @@ VPN_PSK="$VPN_PSK"
 API_PORT=$API_PORT
 UDP_PORT=$UDP_PORT
 PROXY_PORT=$PROXY_PORT
+
+ENABLE_WEB=${ENABLE_WEB:-false}
+WEB_PORT=${WEB_PORT:-3000}
+APP_DOMAIN="${APP_DOMAIN:-}"
+SSL_MODE="${SSL_MODE:-none}"
+SSL_CERT_PATH="${SSL_CERT_PATH:-}"
+SSL_KEY_PATH="${SSL_KEY_PATH:-}"
+LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-}"
+NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://127.0.0.1:$API_PORT}"
 
 ENVEOF
 
@@ -449,6 +596,10 @@ open_ports() {
 
 open_ports
 
+build_web_app
+start_web_app
+configure_nginx
+
 # Build the argument list from environment variables
 SERVER_ARGS=(
     "--api-port"   "${API_PORT:-8080}"
@@ -527,6 +678,12 @@ if [[ "$SERVER_UP" == "false" ]]; then
 fi
 
 echo ""
+if [[ "${ENABLE_WEB:-false}" == "true" ]]; then
+    ok "Web URL (local): http://127.0.0.1:${WEB_PORT:-3000}"
+    if [[ -n "${APP_DOMAIN:-}" ]]; then
+        ok "Web URL (domain): https://${APP_DOMAIN}"
+    fi
+fi
 warn "------------------------------------------------------------------------"
 warn "  CLOUD FIREWALL REMINDER"
 warn "------------------------------------------------------------------------"

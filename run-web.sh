@@ -15,6 +15,30 @@ info() { echo -e "${BLU}[INFO]${RST}  $*"; }
 ok()   { echo -e "${GRN}[ OK ]${RST}  $*"; }
 err()  { echo -e "${RED}[ERR ]${RST}  $*" >&2; }
 
+ensure_js_tooling() {
+    if ! command -v node &>/dev/null; then
+        err "Node.js is required but not installed (need Node.js 18+)"
+        exit 1
+    fi
+    if ! command -v npm &>/dev/null; then
+        err "npm is required but not installed"
+        exit 1
+    fi
+}
+
+install_web_deps() {
+    if [[ -f package-lock.json ]]; then
+        info "Installing dependencies via npm ci..."
+        if npm ci --legacy-peer-deps; then
+            return 0
+        fi
+        info "npm ci failed, retrying with npm install..."
+    else
+        info "package-lock.json not found, using npm install..."
+    fi
+    npm install --legacy-peer-deps
+}
+
 if [[ ! -d "$WEB_DIR" ]]; then
     err "web/ directory not found at $WEB_DIR"
     exit 1
@@ -36,10 +60,8 @@ if [[ -z "${NEXT_PUBLIC_API_URL:-}" ]]; then
     info "NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL"
 fi
 
-if [[ ! -d node_modules ]]; then
-    info "Installing npm dependencies..."
-    npm ci --legacy-peer-deps
-fi
+ensure_js_tooling
+install_web_deps
 
 MODE="${1:-}"
 

@@ -29,6 +29,45 @@ section() { echo -e "\n${CYN}══ $* ══${RST}"; }
 LINUX_TARGET="x86_64-unknown-linux-gnu"
 WINDOWS_TARGET="x86_64-pc-windows-gnu"
 
+ensure_js_tooling() {
+    if command -v bun &>/dev/null; then
+        info "JavaScript runtime: bun $(bun --version 2>/dev/null || true)"
+    fi
+
+    if command -v node &>/dev/null; then
+        ok "Node.js $(node --version 2>/dev/null || true)"
+    else
+        echo -e "${RED}ERROR: Node.js is required but not installed.${RST}"
+        echo "  Install Node.js 18+ from https://nodejs.org"
+        exit 1
+    fi
+
+    if command -v npm &>/dev/null; then
+        ok "npm $(npm --version 2>/dev/null || true)"
+    else
+        echo -e "${RED}ERROR: npm is required but not installed.${RST}"
+        exit 1
+    fi
+}
+
+install_js_deps() {
+    local target_dir="$1"
+    cd "$target_dir"
+
+    if [[ -f package-lock.json ]]; then
+        info "Installing dependencies via npm ci..."
+        if npm ci --legacy-peer-deps; then
+            return 0
+        fi
+        warn "npm ci failed, falling back to npm install..."
+    else
+        warn "package-lock.json not found, using npm install."
+    fi
+
+    npm install --legacy-peer-deps
+}
+
+
 # ── Build Rust server + client ───────────────────────────────────────────────
 build_server() {
     section "Building Rust VPN server & client (Linux)"
@@ -65,11 +104,8 @@ build_web() {
         echo -e "${RED}ERROR: web/ directory not found${RST}"
         exit 1
     fi
-    cd "$WEB_DIR"
-    if [[ ! -d node_modules ]]; then
-        info "Installing npm dependencies..."
-        npm ci --legacy-peer-deps
-    fi
+    ensure_js_tooling
+    install_js_deps "$WEB_DIR"
     npm run build
     mkdir -p "$DIST_DIR/web"
     cp -r .next/standalone/. "$DIST_DIR/web/"
@@ -87,12 +123,9 @@ build_desktop() {
         echo -e "${RED}ERROR: vpn-desktop/ directory not found${RST}"
         exit 1
     fi
-    cd "$DESKTOP_DIR"
-    if [[ ! -d node_modules ]]; then
-        info "Installing npm dependencies..."
-        npm ci --legacy-peer-deps
-    fi
-    npm run tauri build 2>/dev/null || npx tauri build
+    ensure_js_tooling
+    install_js_deps "$DESKTOP_DIR"
+    npm run tauri:build 2>/dev/null || npm run tauri build 2>/dev/null || npx tauri build
     mkdir -p "$DIST_DIR/desktop"
     # Copy Linux bundle
     find src-tauri/target/release/bundle -name "*.deb" -o -name "*.AppImage" \

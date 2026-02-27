@@ -18,6 +18,26 @@ function Write-Ok([string]$msg)    { Write-Host "[ OK ]  $msg" -ForegroundColor 
 function Write-Warn([string]$msg)  { Write-Host "[WARN]  $msg" -ForegroundColor Yellow }
 function Write-Err([string]$msg)   { Write-Host "[ERR ]  $msg" -ForegroundColor Red }
 
+function Install-NpmDeps {
+    param([string]$TargetDir)
+
+    Set-Location $TargetDir
+
+    if (Test-Path "package-lock.json") {
+        Write-Info "Installing npm dependencies via npm ci..."
+        & npm ci --legacy-peer-deps
+        if ($LASTEXITCODE -eq 0) { return }
+        Write-Warn "npm ci failed, retrying with npm install..."
+    }
+    else {
+        Write-Warn "package-lock.json not found, using npm install..."
+    }
+
+    & npm install --legacy-peer-deps
+    if ($LASTEXITCODE -ne 0) { Write-Err "npm install failed"; exit 1 }
+}
+
+
 function Build-Server {
     Write-Host "`n══ Building Rust VPN client (Windows) ══" -ForegroundColor Cyan
 
@@ -45,13 +65,7 @@ function Build-Web {
         exit 1
     }
 
-    Set-Location $WebDir
-
-    if (-not (Test-Path "node_modules")) {
-        Write-Info "Installing npm dependencies..."
-        & npm ci --legacy-peer-deps
-        if ($LASTEXITCODE -ne 0) { Write-Err "npm ci failed"; exit 1 }
-    }
+    Install-NpmDeps -TargetDir $WebDir
 
     & npm run build
     if ($LASTEXITCODE -ne 0) { Write-Err "npm build failed"; exit 1 }
@@ -77,13 +91,7 @@ function Build-Desktop {
         exit 1
     }
 
-    Set-Location $DesktopDir
-
-    if (-not (Test-Path "node_modules")) {
-        Write-Info "Installing npm dependencies..."
-        & npm ci --legacy-peer-deps
-        if ($LASTEXITCODE -ne 0) { Write-Err "npm ci failed"; exit 1 }
-    }
+    Install-NpmDeps -TargetDir $DesktopDir
 
     # Try npm run tauri build first, then fall back to npx
     $tauriCmd = if (Get-Command "npx" -ErrorAction SilentlyContinue) { "npx tauri build" } else { "npm run tauri build" }
