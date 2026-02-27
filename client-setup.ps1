@@ -57,6 +57,23 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# ---------------------------------------------------------------------------
+# Auto-elevate to Administrator (required for TUN/WinTUN mode)
+# ---------------------------------------------------------------------------
+$currentPrincipal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "[INFO]  Restarting as Administrator (required for TUN/WinTUN)..." -ForegroundColor Cyan
+    # Rebuild the original argument list so the elevated process gets the same flags
+    $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"")
+    if ($Connect)   { $argList += "-Connect" }
+    if ($Build)     { $argList += "-Build" }
+    if ($Status)    { $argList += "-Status" }
+    if ($Tun)       { $argList += "-Tun" }
+    if ($SocksPort -gt 0) { $argList += "-SocksPort"; $argList += "$SocksPort" }
+    Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs -Wait
+    exit $LASTEXITCODE
+}
+
 # Force UTF-8 I/O so localized API messages are displayed correctly.
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
@@ -646,20 +663,6 @@ $UseTun = $true
 # -- TUN mode (WinTUN + WebSocket) ---------------------------------------------
 if ($UseTun) {
     Write-Section "Connecting (TUN / WinTUN + WebSocket)"
-
-    # Check for Administrator privileges (required for WinTUN)
-    $isAdmin = ([Security.Principal.WindowsPrincipal] `
-        [Security.Principal.WindowsIdentity]::GetCurrent() `
-    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-
-    if (-not $isAdmin) {
-        Write-Err "TUN mode requires Administrator privileges."
-        Write-Err "Please right-click PowerShell and choose 'Run as Administrator',"
-        Write-Err "then re-run this script with -Tun flag."
-        Write-Err ""
-        Write-Warn "Falling back to SOCKS5 mode for now..."
-        $UseTun = $false
-    }
 }
 
 if ($UseTun) {
