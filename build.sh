@@ -34,11 +34,34 @@ ensure_js_tooling() {
         info "JavaScript runtime: bun $(bun --version 2>/dev/null || true)"
     fi
 
+    if ! command -v nvm &>/dev/null; then
+        if [[ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]]; then
+            # shellcheck disable=SC1090
+            source "${NVM_DIR:-$HOME/.nvm}/nvm.sh"
+        fi
+    fi
+
+    if ! command -v nvm &>/dev/null; then
+        warn "nvm not found; using system Node.js if available"
+    else
+        local required="20"
+        local current_major=""
+        if command -v node &>/dev/null; then
+            current_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+        fi
+
+        if [[ -z "$current_major" || "$current_major" -lt "$required" ]]; then
+            info "Switching Node.js to latest v${required} via nvm..."
+            nvm install "$required"
+            nvm use "$required"
+        fi
+    fi
+
     if command -v node &>/dev/null; then
         ok "Node.js $(node --version 2>/dev/null || true)"
     else
         echo -e "${RED}ERROR: Node.js is required but not installed.${RST}"
-        echo "  Install Node.js 18+ from https://nodejs.org"
+        echo "  Install nvm + Node.js 20+ from https://nodejs.org"
         exit 1
     fi
 
