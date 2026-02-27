@@ -44,7 +44,7 @@ function RegisterForm() {
     <div className="min-h-screen flex items-center justify-center px-4" style={{ background: 'var(--background)' }}>
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-1/4 right-1/3 w-96 h-96 rounded-full opacity-5 blur-3xl"
-          style={{ background: 'radial-gradient(circle, #00ff88, transparent)' }} />
+          style={{ background: 'radial-gradient(circle, #3b82f6, transparent)' }} />
         <div className="absolute bottom-1/4 left-1/3 w-96 h-96 rounded-full opacity-5 blur-3xl"
           style={{ background: 'radial-gradient(circle, #7c3aed, transparent)' }} />
       </div>
@@ -58,15 +58,15 @@ function RegisterForm() {
         <div className="glass rounded-3xl p-8">
           <div className="text-center mb-8">
             <Link href="/" className="inline-flex items-center gap-2 mb-4">
-              <div className="w-10 h-10 rounded-xl glow-green flex items-center justify-center"
-                style={{ background: 'linear-gradient(135deg, #00ff88, #0066ff)' }}>
-                <Shield className="w-5 h-5 text-black" />
+              <div className="w-10 h-10 rounded-xl glow-blue flex items-center justify-center"
+                style={{ background: 'linear-gradient(135deg, #3b82f6, #2563eb)' }}>
+                <Shield className="w-5 h-5 text-white" />
               </div>
               <span className="text-xl font-bold gradient-text">Lowkey VPN</span>
             </Link>
             <h1 className="text-2xl font-bold">Создать аккаунт</h1>
             <p className="text-sm mt-2" style={{ color: 'var(--muted-foreground)' }}>
-              Уже есть аккаунт? <Link href="/auth/login" style={{ color: '#00ff88' }}>Войти</Link>
+              Уже есть аккаунт? <Link href="/auth/login" style={{ color: '#60a5fa' }}>Войти</Link>
             </p>
           </div>
 
@@ -75,11 +75,11 @@ function RegisterForm() {
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               className="rounded-xl p-4 mb-6 text-sm flex items-center gap-3"
-              style={{ background: 'rgba(0,255,136,0.08)', border: '1px solid rgba(0,255,136,0.25)' }}
+              style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.25)' }}
             >
-              <Gift className="w-5 h-5 flex-shrink-0" style={{ color: '#00ff88' }} />
+              <Gift className="w-5 h-5 flex-shrink-0" style={{ color: '#60a5fa' }} />
               <div>
-                <div className="font-semibold" style={{ color: '#00ff88' }}>Реферальная скидка!</div>
+                <div className="font-semibold" style={{ color: '#60a5fa' }}>Реферальная скидка!</div>
                 <div style={{ color: 'var(--muted-foreground)' }}>Вы получите 50% скидку на первую подписку</div>
               </div>
             </motion.div>
@@ -166,7 +166,7 @@ function RegisterForm() {
             <button
               type="submit"
               disabled={isLoading}
-              className="btn btn-primary w-full py-3 mt-2 glow-green"
+              className="btn btn-primary w-full py-3 mt-2 glow-blue"
             >
               {isLoading ? (
                 <span className="flex items-center gap-2">

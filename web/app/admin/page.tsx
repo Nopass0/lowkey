@@ -95,8 +95,8 @@ export default function AdminPage() {
           className="glass rounded-3xl p-8 w-full max-w-sm">
           <div className="text-center mb-8">
             <div className="w-12 h-12 rounded-xl mx-auto mb-4 flex items-center justify-center"
-              style={{ background: 'linear-gradient(135deg, #00ff88, #0066ff)' }}>
-              <Lock className="w-6 h-6 text-black" />
+              style={{ background: 'linear-gradient(135deg, #3b82f6, #2563eb)' }}>
+              <Lock className="w-6 h-6 text-white" />
             </div>
             <h1 className="text-2xl font-bold">Панель администратора</h1>
           </div>
@@ -145,8 +145,8 @@ export default function AdminPage() {
         <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg flex items-center justify-center"
-              style={{ background: 'linear-gradient(135deg, #00ff88, #0066ff)' }}>
-              <Shield className="w-4 h-4 text-black" />
+              style={{ background: 'linear-gradient(135deg, #3b82f6, #2563eb)' }}>
+              <Shield className="w-4 h-4 text-white" />
             </div>
             <span className="font-bold gradient-text">Lowkey VPN Admin</span>
           </div>
@@ -176,7 +176,7 @@ export default function AdminPage() {
           ].map(tab => (
             <button key={tab.id} onClick={() => setActiveTab(tab.id as any)}
               className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors whitespace-nowrap ${
-                activeTab === tab.id ? 'border-green-400 text-white' : 'border-transparent'
+                activeTab === tab.id ? 'border-blue-400 text-white' : 'border-transparent'
               }`}
               style={{ color: activeTab === tab.id ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
               <tab.icon className="w-4 h-4" />
@@ -240,7 +240,7 @@ function StatCard({ icon: Icon, label, value, warning = false }: {
   return (
     <div className={`glass rounded-2xl p-6 ${warning ? 'ring-1 ring-orange-400/50' : ''}`}>
       <div className="flex items-center gap-2 mb-3">
-        <Icon className="w-5 h-5" style={{ color: warning ? '#ffa500' : '#00ff88' }} />
+        <Icon className="w-5 h-5" style={{ color: warning ? '#ffa500' : '#60a5fa' }} />
         <span className="text-sm" style={{ color: 'var(--muted-foreground)' }}>{label}</span>
       </div>
       <div className={`text-3xl font-bold ${warning ? '' : 'gradient-text'}`}
@@ -299,7 +299,7 @@ function UsersTab({ users, adminToken, onRefresh }: { users: UserPublic[]; admin
                   </div>
                 ) : (
                   <button onClick={() => { setEditUser(u.id); setLimitVal(u.sub_speed_mbps.toString()); }}
-                    className="text-xs" style={{ color: '#00ff88' }}>
+                    className="text-xs" style={{ color: '#60a5fa' }}>
                     {u.sub_speed_mbps === 0 ? '∞' : `${u.sub_speed_mbps} Мб`}
                   </button>
                 )}
@@ -471,14 +471,14 @@ function PromosTab({ promos, adminToken, onRefresh }: { promos: any[]; adminToke
         {/* Advanced toggle */}
         <button onClick={() => setShowAdvanced(v => !v)}
           className="text-sm mb-4 flex items-center gap-1"
-          style={{ color: '#00ff88' }}>
+          style={{ color: '#60a5fa' }}>
           <Plus className={`w-3 h-3 transition-transform ${showAdvanced ? 'rotate-45' : ''}`} />
           {showAdvanced ? 'Скрыть условия' : 'Дополнительные условия'}
         </button>
 
         {showAdvanced && (
           <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4 p-4 rounded-xl"
-            style={{ background: 'rgba(0,255,136,0.04)', border: '1px solid rgba(0,255,136,0.15)' }}>
+            style={{ background: 'rgba(59,130,246,0.04)', border: '1px solid rgba(59,130,246,0.15)' }}>
             <div>
               <label className="text-xs mb-1 block" style={{ color: 'var(--muted-foreground)' }}>Только для user_id</label>
               <input type="number" value={form.target_user_id} onChange={e => f('target_user_id', e.target.value)}
@@ -692,7 +692,7 @@ function ReleasesTab({ releases, adminToken, onRefresh }: { releases: AppRelease
       {/* Create release form */}
       <div className="glass rounded-2xl p-6">
         <h3 className="font-semibold mb-4 flex items-center gap-2">
-          <Package className="w-4 h-4" style={{ color: '#00ff88' }} />
+          <Package className="w-4 h-4" style={{ color: '#60a5fa' }} />
           Добавить релиз
         </h3>
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
@@ -755,7 +755,7 @@ function ReleasesTab({ releases, adminToken, onRefresh }: { releases: AppRelease
         return (
           <div key={platform} className="glass rounded-2xl overflow-hidden">
             <div className="px-6 py-4 border-b flex items-center gap-2" style={{ borderColor: 'var(--border)' }}>
-              <Globe className="w-4 h-4" style={{ color: '#00ff88' }} />
+              <Globe className="w-4 h-4" style={{ color: '#60a5fa' }} />
               <span className="font-semibold capitalize">{platform}</span>
               <span className="text-sm" style={{ color: 'var(--muted-foreground)' }}>
                 ({platformReleases.length} {platformReleases.length === 1 ? 'релиз' : 'релизов'})

@@ -149,8 +149,8 @@ export default function DashboardPage() {
         <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
           <Link href="/" className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg flex items-center justify-center"
-              style={{ background: 'linear-gradient(135deg, #00ff88, #0066ff)' }}>
-              <Shield className="w-4 h-4 text-black" />
+              style={{ background: 'linear-gradient(135deg, #3b82f6, #2563eb)' }}>
+              <Shield className="w-4 h-4 text-white" />
             </div>
             <span className="font-bold gradient-text">Lowkey VPN</span>
           </Link>
@@ -182,7 +182,7 @@ export default function DashboardPage() {
               onClick={() => setActiveTab(tab.id as any)}
               className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
                 activeTab === tab.id
-                  ? 'border-green-400 text-white'
+                  ? 'border-blue-400 text-white'
                   : 'border-transparent hover:text-white'
               }`}
               style={{ color: activeTab === tab.id ? 'var(--foreground)' : 'var(--muted-foreground)' }}
@@ -225,7 +225,7 @@ export default function DashboardPage() {
               {/* Balance */}
               <div className="glass rounded-2xl p-6 card-hover">
                 <div className="flex items-center gap-2 mb-4">
-                  <CreditCard className="w-5 h-5" style={{ color: '#00ff88' }} />
+                  <CreditCard className="w-5 h-5" style={{ color: '#60a5fa' }} />
                   <span className="text-sm font-medium" style={{ color: 'var(--muted-foreground)' }}>Баланс</span>
                 </div>
                 <div className="text-3xl font-bold">{formatRub(user.balance)}</div>
@@ -240,7 +240,7 @@ export default function DashboardPage() {
               {/* Subscription */}
               <div className="glass rounded-2xl p-6 card-hover">
                 <div className="flex items-center gap-2 mb-4">
-                  <Shield className="w-5 h-5" style={{ color: user.sub_status === 'active' ? '#00ff88' : '#ff4444' }} />
+                  <Shield className="w-5 h-5" style={{ color: user.sub_status === 'active' ? '#60a5fa' : '#f87171' }} />
                   <span className="text-sm font-medium" style={{ color: 'var(--muted-foreground)' }}>Подписка</span>
                 </div>
                 <div className="flex items-center gap-2 mb-2">
@@ -278,7 +278,7 @@ export default function DashboardPage() {
             {/* Promo code */}
             <div className="glass rounded-2xl p-6">
               <div className="flex items-center gap-2 mb-4">
-                <Tag className="w-5 h-5" style={{ color: '#00ff88' }} />
+                <Tag className="w-5 h-5" style={{ color: '#60a5fa' }} />
                 <h3 className="font-semibold">Промокод</h3>
               </div>
               <div className="flex gap-3">
@@ -296,7 +296,7 @@ export default function DashboardPage() {
               </div>
               {promoMsg && (
                 <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-                  className="mt-3 text-sm" style={{ color: '#00ff88' }}>
+                  className="mt-3 text-sm" style={{ color: '#60a5fa' }}>
                   {promoMsg}
                 </motion.p>
               )}
@@ -309,10 +309,10 @@ export default function DashboardPage() {
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
             {user.first_purchase_done === false && user.referral_balance !== undefined && (
               <div className="rounded-2xl p-4 mb-6 flex items-center gap-3"
-                style={{ background: 'rgba(0,255,136,0.08)', border: '1px solid rgba(0,255,136,0.25)' }}>
-                <Gift className="w-5 h-5" style={{ color: '#00ff88' }} />
+                style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.25)' }}>
+                <Gift className="w-5 h-5" style={{ color: '#60a5fa' }} />
                 <div className="text-sm">
-                  <span className="font-semibold" style={{ color: '#00ff88' }}>Скидка 50%</span>
+                  <span className="font-semibold" style={{ color: '#60a5fa' }}>Скидка 50%</span>
                   <span style={{ color: 'var(--muted-foreground)' }}> на первую подписку (реферальная программа)</span>
                 </div>
               </div>
@@ -405,15 +405,15 @@ export default function DashboardPage() {
               <div className="mt-4 p-4 rounded-xl text-sm space-y-2"
                 style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)' }}>
                 <div className="flex items-center gap-2">
-                  <Check className="w-4 h-4 flex-shrink-0" style={{ color: '#00ff88' }} />
+                  <Check className="w-4 h-4 flex-shrink-0" style={{ color: '#60a5fa' }} />
                   <span style={{ color: 'var(--muted-foreground)' }}>Вы получаете <strong className="text-white">25%</strong> с каждого платежа реферала</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <Check className="w-4 h-4 flex-shrink-0" style={{ color: '#00ff88' }} />
+                  <Check className="w-4 h-4 flex-shrink-0" style={{ color: '#60a5fa' }} />
                   <span style={{ color: 'var(--muted-foreground)' }}>Ваш друг получает <strong className="text-white">скидку 50%</strong> на первую подписку</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <Check className="w-4 h-4 flex-shrink-0" style={{ color: '#00ff88' }} />
+                  <Check className="w-4 h-4 flex-shrink-0" style={{ color: '#60a5fa' }} />
                   <span style={{ color: 'var(--muted-foreground)' }}>Минимальная сумма вывода: <strong className="text-white">100 ₽</strong></span>
                 </div>
               </div>
@@ -421,7 +421,7 @@ export default function DashboardPage() {
 
             {refStats.referral_balance >= 100 && (
               <button onClick={() => setWithdrawModal(true)}
-                className="btn btn-primary w-full py-3 glow-green">
+                className="btn btn-primary w-full py-3 glow-blue">
                 <Send className="w-4 h-4" />
                 Вывести {formatRub(refStats.referral_balance)} на карту
               </button>
@@ -466,7 +466,7 @@ export default function DashboardPage() {
               <h3 className="text-xl font-bold mb-4">Промокод</h3>
               <input type="text" value={promoCode} onChange={e => setPromoCode(e.target.value.toUpperCase())}
                 placeholder="XXXXXXXX" className="w-full mb-4" />
-              {promoMsg && <p className="text-sm mb-4" style={{ color: '#00ff88' }}>{promoMsg}</p>}
+              {promoMsg && <p className="text-sm mb-4" style={{ color: '#60a5fa' }}>{promoMsg}</p>}
               <div className="flex gap-3">
                 <button onClick={() => setPromoModal(false)} className="btn btn-secondary flex-1">Закрыть</button>
                 <button onClick={handleApplyPromo} disabled={promoLoading || !promoCode}
@@ -486,7 +486,7 @@ export default function DashboardPage() {
               <h3 className="text-xl font-bold mb-6">Вывод реферальных средств</h3>
               {withdrawMsg ? (
                 <div>
-                  <p className="text-sm mb-6" style={{ color: '#00ff88' }}>{withdrawMsg}</p>
+                  <p className="text-sm mb-6" style={{ color: '#60a5fa' }}>{withdrawMsg}</p>
                   <button onClick={() => { setWithdrawModal(false); setWithdrawMsg(''); }}
                     className="btn btn-primary w-full">Закрыть</button>
                 </div>
@@ -569,7 +569,7 @@ function PaymentModal({
           <div className="space-y-4">
             {hasDiscount && (
               <div className="rounded-xl p-3 text-sm flex items-center gap-2"
-                style={{ background: 'rgba(0,255,136,0.08)', border: '1px solid rgba(0,255,136,0.2)', color: '#00ff88' }}>
+                style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)', color: '#60a5fa' }}>
                 <Gift className="w-4 h-4" />
                 Скидка 50% на первую подписку будет применена автоматически
               </div>
@@ -579,7 +579,7 @@ function PaymentModal({
               {(['balance', 'subscription'] as const).map(p => (
                 <button key={p} onClick={() => setPayPurpose(p)}
                   className={`flex-1 py-2.5 rounded-xl text-sm font-medium transition-colors ${
-                    payPurpose === p ? 'bg-green-400/20 text-white border border-green-400/50' : 'btn btn-secondary'
+                    payPurpose === p ? 'bg-blue-400/20 text-white border border-blue-400/50' : 'btn btn-secondary'
                   }`}>
                   {p === 'balance' ? 'Пополнить баланс' : 'Купить подписку'}
                 </button>
@@ -620,7 +620,7 @@ function PaymentModal({
             <button
               onClick={onCreate}
               disabled={payLoading || !payAmount || parseFloat(payAmount) < 10}
-              className="btn btn-primary w-full py-3 glow-green"
+              className="btn btn-primary w-full py-3 glow-blue"
             >
               {payLoading ? (
                 <span className="flex items-center gap-2">
@@ -643,11 +643,11 @@ function PaymentModal({
                 animate={{ opacity: 1, scale: 1 }}
                 className="space-y-4"
               >
-                <div className="w-20 h-20 rounded-full mx-auto flex items-center justify-center glow-green"
-                  style={{ background: 'rgba(0,255,136,0.2)' }}>
-                  <Check className="w-10 h-10" style={{ color: '#00ff88' }} />
+                <div className="w-20 h-20 rounded-full mx-auto flex items-center justify-center glow-blue"
+                  style={{ background: 'rgba(59,130,246,0.2)' }}>
+                  <Check className="w-10 h-10" style={{ color: '#60a5fa' }} />
                 </div>
-                <h4 className="text-xl font-bold" style={{ color: '#00ff88' }}>Платёж получен!</h4>
+                <h4 className="text-xl font-bold" style={{ color: '#60a5fa' }}>Платёж получен!</h4>
                 <p style={{ color: 'var(--muted-foreground)' }}>
                   {payPurpose === 'subscription' && payStatus?.sub_expires_at
                     ? `Подписка активна до ${formatDate(payStatus.sub_expires_at)}`
@@ -671,7 +671,7 @@ function PaymentModal({
                 <div className="flex items-center justify-center gap-2 text-sm"
                   style={{ color: 'var(--muted-foreground)' }}>
                   {polling && (
-                    <div className="w-3 h-3 border-2 border-green-400/30 border-t-green-400 rounded-full animate-spin" />
+                    <div className="w-3 h-3 border-2 border-blue-400/30 border-t-blue-400 rounded-full animate-spin" />
                   )}
                   <span>
                     {payStatus?.status === 'expired'

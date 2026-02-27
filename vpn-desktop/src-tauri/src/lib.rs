@@ -233,7 +233,7 @@ pub fn run() {
             get_referral_stats,
             check_for_update,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             // Create system tray
             let quit = MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?;
             let show = MenuItem::with_id(app, "show", "Открыть", true, None::<&str>)?;
