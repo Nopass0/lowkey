@@ -1,0 +1,107 @@
+version: "3.9"
+
+# =============================================================================
+# Lowkey VPN — Docker Compose
+# =============================================================================
+#
+# Usage:
+#   docker compose up -d              → start all services
+#   docker compose up -d --build      → rebuild and start
+#   docker compose logs -f vpn-server → tail server logs
+#   docker compose down               → stop all services
+#
+# Configuration:
+#   Copy .env.example to .env and set your values before starting.
+#   Required: DATABASE_URL is set automatically to the postgres service below.
+#   Required: JWT_SECRET, VPN_PSK (auto-generated if not set)
+#   Optional: TG_BOT_TOKEN, TG_ADMIN_CHAT_ID (Telegram OTP for admin login)
+#   Optional: TOCHKA_JWT, TOCHKA_MERCHANT_ID, TOCHKA_LEGAL_ID (SBP payments)
+#
+# Notes:
+#   - VPN server needs --privileged + /dev/net/tun for TUN device.
+#   - Web app talks to vpn-server over the internal Docker network.
+#   - Public ports: 80/443 (web), 8080 (API), 51820/udp (VPN tunnel).
+#
+# =============================================================================
+
+services:
+
+  # ── PostgreSQL database ───────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: lowkey-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lowkey
+      POSTGRES_USER: lowkey
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lowkey"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lowkey
+
+  # ── VPN server (Rust) ─────────────────────────────────────────────────────
+  vpn-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: lowkey-server
+    restart: unless-stopped
+    privileged: true                    # required for TUN device + iptables
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      DATABASE_URL: postgres://lowkey:${POSTGRES_PASSWORD:-change_me_in_env}@postgres/lowkey
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      VPN_PSK: ${VPN_PSK:?VPN_PSK must be set in .env}
+      API_PORT: ${API_PORT:-8080}
+      UDP_PORT: ${UDP_PORT:-51820}
+      PROXY_PORT: ${PROXY_PORT:-8388}
+      TG_BOT_TOKEN: ${TG_BOT_TOKEN:-}
+      TG_ADMIN_CHAT_ID: ${TG_ADMIN_CHAT_ID:-}
+      TOCHKA_JWT: ${TOCHKA_JWT:-}
+      TOCHKA_MERCHANT_ID: ${TOCHKA_MERCHANT_ID:-}
+      TOCHKA_LEGAL_ID: ${TOCHKA_LEGAL_ID:-}
+    ports:
+      - "${API_PORT:-8080}:${API_PORT:-8080}"    # HTTP API
+      - "${UDP_PORT:-51820}:${UDP_PORT:-51820}/udp" # VPN UDP tunnel
+      - "${PROXY_PORT:-8388}:${PROXY_PORT:-8388}"   # TCP proxy (SOCKS5/VLESS)
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - lowkey
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+
+  # ── Web dashboard (Next.js) ───────────────────────────────────────────────
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://vpn-server:8080}
+    container_name: lowkey-web
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://vpn-server:8080}
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      - vpn-server
+    networks:
+      - lowkey
+
+volumes:
+  postgres_data:
+
+networks:
+  lowkey:
+    driver: bridge
