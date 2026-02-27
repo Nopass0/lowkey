@@ -43,9 +43,9 @@
       "icons/icon.ico"
     ],
     "targets": "all",
-    "category": "Network",
+    "category": "Utility",
     "shortDescription": "Secure VPN client",
-    "longDescription": "Lowkey VPN — secure, fast and private VPN service"
+    "longDescription": "Lowkey VPN \u2014 secure, fast and private VPN service"
   },
   "plugins": {
     "autostart": {
