@@ -1,7 +1,7 @@
 //! Lowkey VPN Desktop — Tauri backend.
 //!
 //! Provides Tauri commands for:
-//! - VPN connection/disconnection (via OS VPN or client binary)
+//! - VPN connection/disconnection (embedded Hysteria2 SOCKS5 proxy)
 //! - Session persistence (via tauri-plugin-store)
 //! - SBP payment status polling
 //! - System tray management
@@ -15,10 +15,22 @@ use tauri::{
 
 mod vpn;
 mod api;
+mod hysteria;
+
+/// Server IP baked in at build time via `LOWKEY_SERVER_IP` env var.
+/// Empty string if not set at build time — app falls back to the stored API URL.
+const BAKED_SERVER_IP: Option<&str> = option_env!("LOWKEY_SERVER_IP");
+
+/// Local SOCKS5 proxy port used by the embedded Hysteria2 client.
+const SOCKS5_PORT: u16 = 10808;
+
+/// Default Hysteria2 server port (TCP proxy port on the VPN server).
+const DEFAULT_HYSTERIA_PORT: u16 = 8388;
 
 /// Global VPN connection state.
 pub struct VpnState {
     pub connected: Mutex<bool>,
+    /// SOCKS5 proxy address (e.g. "127.0.0.1:10808") when connected.
     pub vpn_ip: Mutex<Option<String>>,
     pub server_ip: Mutex<Option<String>>,
 }
@@ -34,6 +46,10 @@ impl Default for VpnState {
 }
 
 /// Toggle VPN connection.
+///
+/// On connect: calls `/api/peers/register`, uses the returned `psk` as the
+/// Hysteria2 password and starts the embedded SOCKS5 proxy on port 10808.
+/// On disconnect: tears down the proxy.
 #[tauri::command]
 async fn toggle_vpn(
     state: State<'_, Arc<VpnState>>,
@@ -53,30 +69,34 @@ async fn toggle_vpn(
 
         Ok(serde_json::json!({ "connected": false }))
     } else {
-        // Connect: register peer and start VPN
+        // Register peer with server to obtain credentials
         let peer_info = api::register_peer(&api_url, &token)
             .await
             .map_err(|e| e.to_string())?;
 
-        let vpn_ip = peer_info["vpn_ip"].as_str().unwrap_or("").to_string();
         let server = peer_info["server_ip"].as_str().unwrap_or("").to_string();
-        let port = peer_info["port"].as_u64().unwrap_or(51820) as u16;
-        let psk = peer_info["psk"].as_str().unwrap_or("").to_string();
+        let password = peer_info["psk"].as_str().unwrap_or("").to_string();
+        // Server may return a dedicated hysteria_port; fall back to default 8388
+        let hysteria_port = peer_info["hysteria_port"]
+            .as_u64()
+            .unwrap_or(DEFAULT_HYSTERIA_PORT as u64) as u16;
 
-        vpn::connect(&server, port, &psk, &vpn_ip)
+        vpn::connect(&server, hysteria_port, &password, SOCKS5_PORT)
             .await
             .map_err(|e| e.to_string())?;
 
+        let socks5_addr = format!("127.0.0.1:{SOCKS5_PORT}");
         *state.connected.lock().unwrap() = true;
-        *state.vpn_ip.lock().unwrap() = Some(vpn_ip.clone());
+        *state.vpn_ip.lock().unwrap() = Some(socks5_addr.clone());
         *state.server_ip.lock().unwrap() = Some(server.clone());
 
         update_tray_icon(&app, true);
 
         Ok(serde_json::json!({
             "connected": true,
-            "vpn_ip": vpn_ip,
+            "vpn_ip": socks5_addr,
             "server_ip": server,
+            "socks5_port": SOCKS5_PORT,
         }))
     }
 }
@@ -92,6 +112,17 @@ fn vpn_status(state: State<'_, Arc<VpnState>>) -> serde_json::Value {
         "vpn_ip": vpn_ip,
         "server_ip": server_ip,
     })
+}
+
+/// Return the server IP baked in at build time, if any.
+///
+/// Used by the frontend to pre-fill the server address field so users
+/// don't have to enter it manually.
+#[tauri::command]
+fn get_baked_server_ip() -> Option<String> {
+    BAKED_SERVER_IP
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_owned())
 }
 
 /// Fetch user info from the API.
@@ -195,7 +226,7 @@ fn compare_versions(v1: &str, v2: &str) -> i32 {
     0
 }
 
-/// Update tray icon based on VPN state.
+/// Update tray icon tooltip based on VPN state.
 fn update_tray_icon(app: &AppHandle, connected: bool) {
     if let Some(tray) = app.tray_by_id("main") {
         let tooltip = if connected {
@@ -225,6 +256,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             toggle_vpn,
             vpn_status,
+            get_baked_server_ip,
             get_user_info,
             api_login,
             get_plans,

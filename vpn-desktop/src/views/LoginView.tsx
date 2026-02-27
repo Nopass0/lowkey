@@ -33,7 +33,7 @@ export default function LoginView() {
       {/* Background glow */}
       <div className="fixed inset-0 pointer-events-none">
         <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-64 h-64 rounded-full opacity-10 blur-3xl"
-          style={{ background: 'radial-gradient(circle, #00ff88, transparent)' }} />
+          style={{ background: 'radial-gradient(circle, #3b82f6, transparent)' }} />
       </div>
 
       <motion.div
@@ -44,8 +44,8 @@ export default function LoginView() {
         {/* Logo */}
         <div className="text-center mb-8">
           <div className="w-16 h-16 rounded-2xl mx-auto mb-4 flex items-center justify-center"
-            style={{ background: 'linear-gradient(135deg, #00ff88, #0066ff)' }}>
-            <Shield className="w-8 h-8 text-black" />
+            style={{ background: 'linear-gradient(135deg, #3b82f6, #2563eb)' }}>
+            <Shield className="w-8 h-8 text-white" />
           </div>
           <h1 className="text-2xl font-bold gradient-text">Lowkey VPN</h1>
           <p className="text-sm mt-1" style={{ color: 'var(--muted)' }}>Безопасный и быстрый VPN</p>

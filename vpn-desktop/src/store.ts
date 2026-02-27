@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { invoke } from '@tauri-apps/api/core';
 
 interface User {
   id: number;
@@ -13,6 +14,10 @@ interface User {
   first_purchase_done: boolean;
 }
 
+// VITE_API_URL can be injected at build time via the VITE_API_URL env var
+// (set automatically by build.sh / build.ps1 when a server IP is provided).
+const BUILD_TIME_API_URL: string | undefined = import.meta.env.VITE_API_URL;
+
 interface AppState {
   token: string | null;
   user: User | null;
@@ -25,14 +30,18 @@ interface AppState {
   setConnected: (connected: boolean, vpnIp?: string) => void;
   setApiUrl: (url: string) => void;
   logout: () => void;
+
+  /** Apply the server IP baked in at build time, if not already configured. */
+  applyBakedServerIp: () => Promise<void>;
 }
 
 export const useStore = create<AppState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       token: null,
       user: null,
-      apiUrl: 'http://localhost:8080',
+      // Use build-time URL if provided, else fall back to localhost
+      apiUrl: BUILD_TIME_API_URL || 'http://localhost:8080',
       connected: false,
       vpnIp: null,
 
@@ -41,6 +50,20 @@ export const useStore = create<AppState>()(
       setConnected: (connected, vpnIp) => set({ connected, vpnIp: vpnIp || null }),
       setApiUrl: (apiUrl) => set({ apiUrl }),
       logout: () => set({ token: null, user: null, connected: false, vpnIp: null }),
+
+      applyBakedServerIp: async () => {
+        // Only override if still on the default localhost value
+        const current = get().apiUrl;
+        if (current !== 'http://localhost:8080') return;
+        try {
+          const bakedIp = await invoke<string | null>('get_baked_server_ip');
+          if (bakedIp && bakedIp.length > 0) {
+            set({ apiUrl: `http://${bakedIp}:8080` });
+          }
+        } catch {
+          // Ignore — running in browser without Tauri runtime
+        }
+      },
     }),
     {
       name: 'lowkey-vpn-store',

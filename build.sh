@@ -155,6 +155,18 @@ build_desktop() {
         echo -e "${RED}ERROR: vpn-desktop/ directory not found${RST}"
         exit 1
     fi
+
+    # Prompt for VPN server IP to bake into the binary as the default
+    echo ""
+    echo -e "${YEL}Enter the VPN server IP to embed as the default (e.g. 1.2.3.4).${RST}"
+    echo -e "${YEL}Leave blank to skip — users configure it in the app settings.${RST}"
+    read -r -p "VPN server IP: " LOWKEY_SERVER_IP
+    export LOWKEY_SERVER_IP
+    if [[ -n "$LOWKEY_SERVER_IP" ]]; then
+        export VITE_API_URL="http://${LOWKEY_SERVER_IP}:8080"
+        info "Baking server IP: $LOWKEY_SERVER_IP  (API URL: $VITE_API_URL)"
+    fi
+
     ensure_js_tooling
     install_js_deps "$DESKTOP_DIR"
     npm run tauri:build 2>/dev/null || npm run tauri build 2>/dev/null || npx tauri build
