@@ -45,3 +45,20 @@ sha2         = "0.10"
 # Payment / referral additions
 uuid         = { version = "1",    features = ["v4", "serde"] }
 base64       = "0.22"
+
+# ── Hysteria2 / QUIC transport ────────────────────────────────────────────────
+# QUIC implementation (RFC 9000)
+quinn        = { version = "0.11", features = ["runtime-tokio", "rustls"] }
+# HTTP/3 implementation (for Hysteria2 auth masquerading as HTTP/3)
+h3           = "0.0.8"
+h3-quinn     = "0.0.10"
+# BLAKE2b hashing for Salamander obfuscation
+blake2       = "0.10"
+# Self-signed TLS certificate generation
+rcgen        = "0.13"
+# rustls for TLS configuration
+rustls       = { version = "0.23", default-features = false, features = ["ring"] }
+# bytes for efficient zero-copy buffer handling
+bytes        = "1"
+# HTTP types used by h3 (Response, StatusCode, etc.)
+http         = "1"

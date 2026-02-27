@@ -28,6 +28,7 @@ mod api;
 mod auth_middleware;
 mod dashboard;
 mod db;
+mod hysteria_server;
 mod models;
 mod payment_api;
 mod proxy;
@@ -111,6 +112,22 @@ struct Args {
     /// Tochka Bank legal entity ID.
     #[arg(long, env = "TOCHKA_LEGAL_ID")]
     tochka_legal_id: Option<String>,
+
+    /// Hysteria2 QUIC listen port (0 = disabled).
+    /// Clients can connect with `--transport hysteria` or official Hysteria2 clients.
+    #[arg(long, env = "HYSTERIA_PORT", default_value_t = 8443)]
+    hysteria_port: u16,
+
+    /// Hysteria2 authentication password.
+    /// Defaults to the VPN pre-shared key (`--psk`) when not set.
+    #[arg(long, env = "HYSTERIA_PASSWORD")]
+    hysteria_password: Option<String>,
+
+    /// Salamander obfuscation password for Hysteria2 (optional).
+    /// When set, QUIC packets are XOR-obfuscated with BLAKE2b; both server
+    /// and client must use the same password.
+    #[arg(long, env = "HYSTERIA_OBFS")]
+    hysteria_obfs: Option<String>,
 
     /// Disable the TUI dashboard.  Useful under SSH, systemd or in CI.
     #[arg(long, default_value_t = false)]
@@ -273,6 +290,25 @@ async fn main() -> Result<()> {
                 tracing::error!("Proxy task died: {e}");
             }
         });
+    }
+
+    // ── Hysteria2 QUIC server ─────────────────────────────────────────────────
+    {
+        let hysteria_cfg = hysteria_server::HysteriaConfig {
+            port: args.hysteria_port,
+            password: args.hysteria_password.clone().unwrap_or_else(|| args.psk.clone()),
+            obfs_password: args.hysteria_obfs.clone(),
+            max_download_mbps: 0,
+            max_upload_mbps: 0,
+        };
+        let s = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = hysteria_server::run_hysteria_server(hysteria_cfg, s).await {
+                tracing::error!("Hysteria2 server error: {e:#}");
+            }
+        });
+        info!("Hysteria2 QUIC on :{}", args.hysteria_port);
+        state.push_log(format!("Hysteria2 on :{}", args.hysteria_port));
     }
 
     // ── HTTP API ──────────────────────────────────────────────────────────────
