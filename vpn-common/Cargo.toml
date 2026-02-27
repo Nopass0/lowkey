@@ -10,3 +10,9 @@ chacha20poly1305 = "0.10"
 hkdf        = "0.12"
 sha2        = "0.10"
 rand        = "0.8"
+# BLAKE2b for Hysteria2 Salamander obfuscation
+blake2      = "0.10"
+# zero-copy byte buffers (shared with hysteria framing)
+bytes       = "1"
+# anyhow for ergonomic error handling
+anyhow      = "1"

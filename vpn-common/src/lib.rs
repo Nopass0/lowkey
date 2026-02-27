@@ -41,6 +41,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 
+/// Hysteria2 protocol types: wire formats, Salamander obfuscation, address
+/// encoding.  See [`hysteria`] for the full API.
+pub mod hysteria;
+
 // ── Network constants ─────────────────────────────────────────────────────────
 
 /// VPN server-side TUN IP (gateway for all clients).

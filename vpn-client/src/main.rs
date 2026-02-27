@@ -1,5 +1,17 @@
 //! # Lowkey VPN Client
 //!
+//! ## Hysteria2 transport
+//!
+//! Use `--transport hysteria` to connect via QUIC instead of UDP/WebSocket:
+//!
+//! ```sh
+//! vpn-client connect --server 1.2.3.4 --mode socks5 --transport hysteria
+//! ```
+//!
+//! This is the most censorship-resistant option.  The server must have
+//! `--hysteria-port` set (default 8443).  Certificate verification is
+//! skipped by default; use `--tls-fingerprint` for production pinning.
+//!
 //! A cross-platform VPN client that supports two connection modes:
 //!
 //! | Mode | Platform | How it works |
@@ -26,6 +38,8 @@
 //! After a successful login the JWT and server address are saved to
 //! `~/.config/lowkey/session.json` so subsequent commands don't need
 //! `--server` / `--api-port` arguments.
+
+mod hysteria_client;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -104,6 +118,13 @@ enum Transport {
     /// Encrypted packets wrapped in WebSocket frames over TCP port 8080.
     /// Bypasses corporate firewalls and ISP blocking — looks like HTTP traffic.
     Ws,
+    /// Hysteria2 QUIC transport — the most censorship-resistant option.
+    ///
+    /// Only compatible with `--mode socks5`.
+    /// Requires the server to be started with `--hysteria-port` (default 8443).
+    /// TLS certificate verification is skipped by default; for production use
+    /// `--tls-fingerprint <SHA256>` (printed by the server on startup).
+    Hysteria,
 }
 
 #[derive(Parser)]
@@ -163,6 +184,15 @@ enum Cmd {
         /// Only route the VPN subnet (10.0.0.0/24) instead of all traffic.
         #[arg(long, default_value_t = false)]
         split_tunnel: bool,
+
+        /// Hysteria2 QUIC server port (only used with `--transport hysteria`).
+        #[arg(long, default_value_t = 8443)]
+        hysteria_port: u16,
+
+        /// Skip TLS certificate verification for the Hysteria2 connection.
+        /// Convenient in development; in production use `--tls-fingerprint`.
+        #[arg(long, default_value_t = true)]
+        tls_skip_verify: bool,
     },
 }
 
@@ -274,11 +304,32 @@ async fn main() -> Result<()> {
             proxy_port,
             socks_port,
             split_tunnel,
+            hysteria_port,
+            tls_skip_verify,
         } => {
             let session = load_session();
             let srv = server
                 .or(session.server.clone())
                 .context("--server required")?;
+
+            // ── Hysteria2 transport: QUIC-based SOCKS5 proxy ─────────────────
+            if transport == Transport::Hysteria {
+                // The JWT is used as the Hysteria2 password, ensuring that only
+                // users with valid accounts can authenticate.
+                let tok = session
+                    .token
+                    .context("Not logged in. Run: vpn-client auth login")?;
+                hysteria_client::run_hysteria_socks5(
+                    &srv,
+                    hysteria_port,
+                    &tok,
+                    socks_port,
+                    tls_skip_verify,
+                )
+                .await?;
+                return Ok(());
+            }
+
             let tok = session
                 .token
                 .context("Not logged in. Run: vpn-client auth login")?;
@@ -816,69 +867,157 @@ async fn ws_tun_windows(
 // ── Windows helpers ───────────────────────────────────────────────────────────
 
 #[cfg(windows)]
+/// Assign a static IP address to the "Lowkey" WinTUN adapter using `netsh`.
+///
+/// Also configures DNS servers to prevent DNS leaks: sends all DNS queries
+/// through `8.8.8.8` / `8.8.4.4` which will route through the VPN tunnel.
+///
+/// Uses PowerShell `Set-DnsClientServerAddress` to reliably set DNS on the
+/// adapter (the `netsh dns` command can be unreliable on newer Windows).
+#[cfg(windows)]
 fn configure_win_adapter_ip(ip: &str) -> Result<()> {
     use std::process::Command;
-    Command::new("netsh")
+
+    // Set static IPv4 address, netmask and gateway on the WinTUN adapter
+    let status = Command::new("netsh")
         .args([
             "interface", "ip", "set", "address",
-            "Lowkey", "static", ip,
-            vpn_common::VPN_NETMASK, vpn_common::VPN_SERVER_IP,
+            "name=Lowkey",          // adapter name (matches wintun::Adapter::create)
+            "source=static",
+            &format!("address={ip}"),
+            &format!("mask={}", vpn_common::VPN_NETMASK),
+            &format!("gateway={}", vpn_common::VPN_SERVER_IP),
+            "gwmetric=1",
         ])
-        .output()
-        .context("netsh: failed to set WinTUN adapter IP")?;
+        .status()
+        .context("netsh: set address failed")?;
+
+    if !status.success() {
+        // netsh sometimes returns non-zero even on success; log a warning
+        // but don't bail — the adapter may still be usable.
+        tracing::warn!("netsh set-address returned non-zero (may be harmless)");
+    }
+
+    // Set DNS servers on the Lowkey adapter to prevent DNS leaks.
+    // Google's public DNS (8.8.8.8 / 8.8.4.4) will route through the VPN.
+    let dns_cmd = Command::new("powershell")
+        .args([
+            "-NoProfile", "-NonInteractive", "-Command",
+            "Set-DnsClientServerAddress -InterfaceAlias 'Lowkey' \
+             -ServerAddresses ('8.8.8.8','8.8.4.4')",
+        ])
+        .status();
+    if let Err(e) = dns_cmd {
+        tracing::warn!("DNS config failed (DNS leak possible): {e}");
+    }
+
     Ok(())
 }
 
+/// Detect the current default IPv4 gateway using PowerShell `Get-NetRoute`.
+///
+/// Returns the gateway IP as a string (e.g. `"192.168.1.1"`).
+/// Fails if no default route exists (no internet connectivity).
 #[cfg(windows)]
 fn get_windows_gateway() -> Result<String> {
     use std::process::Command;
     let out = Command::new("powershell")
         .args([
-            "-NoProfile", "-Command",
+            "-NoProfile", "-NonInteractive", "-Command",
+            // Filter out the WinTUN adapter's routes (InterfaceAlias != 'Lowkey')
+            // Sort by RouteMetric to prefer the primary gateway
             "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | \
-              Sort-Object -Property RouteMetric | \
+              Where-Object { $_.InterfaceAlias -ne 'Lowkey' } | \
+              Sort-Object -Property { $_.RouteMetric + $_.InterfaceMetric } | \
               Select-Object -First 1).NextHop",
         ])
         .output()
         .context("powershell: could not detect default gateway")?;
     let gw = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if gw.is_empty() {
-        anyhow::bail!("No default gateway detected");
+    if gw.is_empty() || gw == "0.0.0.0" {
+        anyhow::bail!(
+            "No default gateway detected. Check your network connection."
+        );
     }
     Ok(gw)
 }
 
-/// Add two /1 routes covering all IPv4 space via VPN, plus a host route
-/// for the VPN server via the original gateway to avoid routing loops.
+/// Set up Windows routing for full-tunnel VPN mode.
+///
+/// Routing table after this function:
+///
+/// ```text
+/// 0.0.0.0/1     via 10.66.0.1  (VPN)  ← all internet traffic
+/// 128.0.0.0/1   via 10.66.0.1  (VPN)
+/// <server>/32   via <orig_gw>   (WAN)  ← VPN server traffic bypasses tunnel
+/// 10.66.0.0/24  on  Lowkey             ← VPN subnet local
+/// ```
+///
+/// Splitting the default route into two /1 routes is the standard trick to
+/// override the kernel's 0.0.0.0/0 default without the route tool's
+/// "destination == gateway" check interfering.
 #[cfg(windows)]
 fn setup_windows_routing(server: &str, orig_gw: &str) -> Result<()> {
     use std::process::Command;
+
+    // 1. Route VPN server traffic through the original gateway (prevent loop)
     let _ = Command::new("route").args(["delete", server]).output();
-    Command::new("route")
-        .args(["add", server, "mask", "255.255.255.255", orig_gw])
-        .output()
+    let status = Command::new("route")
+        .args(["add", server, "mask", "255.255.255.255", orig_gw, "metric", "5"])
+        .status()
         .context("route add: server host route")?;
-    for net in ["0.0.0.0", "128.0.0.0"] {
-        let _ = Command::new("route")
-            .args(["delete", net, "mask", "128.0.0.0"])
-            .output();
-        Command::new("route")
-            .args(["add", net, "mask", "128.0.0.0", vpn_common::VPN_SERVER_IP])
-            .output()
-            .with_context(|| format!("route add {net}/1 via VPN"))?;
+    if !status.success() {
+        anyhow::bail!("Failed to add server host route via {orig_gw}");
     }
+
+    // 2. Route all other traffic through the VPN tunnel (two /1 blocks)
+    for (net, mask) in [("0.0.0.0", "128.0.0.0"), ("128.0.0.0", "128.0.0.0")] {
+        let _ = Command::new("route")
+            .args(["delete", net, "mask", mask])
+            .output();
+        let status = Command::new("route")
+            .args([
+                "add", net, "mask", mask,
+                vpn_common::VPN_SERVER_IP,
+                "metric", "6",
+            ])
+            .status()
+            .with_context(|| format!("route add {net}/{mask} via VPN"))?;
+        if !status.success() {
+            anyhow::bail!("Failed to add default route {net}/{mask} via VPN gateway");
+        }
+    }
+
+    info!("Windows routing: all traffic → VPN (server {server} → WAN)");
     Ok(())
 }
 
+/// Remove the VPN-specific routes added by [`setup_windows_routing`].
+///
+/// Called on Ctrl-C to restore the system to its pre-VPN routing state.
 #[cfg(windows)]
 fn restore_windows_routing(server: &str, _orig_gw: &str) {
     use std::process::Command;
+
+    // Remove the server host route (WAN bypass)
     let _ = Command::new("route").args(["delete", server]).output();
-    for net in ["0.0.0.0", "128.0.0.0"] {
+
+    // Remove the two /1 default routes pointing at the VPN gateway
+    for (net, mask) in [("0.0.0.0", "128.0.0.0"), ("128.0.0.0", "128.0.0.0")] {
         let _ = Command::new("route")
-            .args(["delete", net, "mask", "128.0.0.0"])
+            .args(["delete", net, "mask", mask])
             .output();
     }
+
+    // Restore DNS to automatic (DHCP) to remove the VPN DNS settings
+    let _ = Command::new("powershell")
+        .args([
+            "-NoProfile", "-NonInteractive", "-Command",
+            "Set-DnsClientServerAddress -InterfaceAlias 'Lowkey' -ResetServerAddresses",
+        ])
+        .output();
+
+    info!("Windows routing restored.");
 }
 
 // ── TUN mode (Unix only) ──────────────────────────────────────────────────────

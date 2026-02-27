@@ -28,8 +28,11 @@ mod api;
 mod auth_middleware;
 mod dashboard;
 mod db;
+mod hysteria_server;
 mod models;
+mod payment_api;
 mod proxy;
+mod referral_api;
 mod state;
 mod telegram;
 mod tunnel;
@@ -97,6 +100,34 @@ struct Args {
     /// Telegram admin chat ID.  The bot sends OTP codes here.
     #[arg(long, env = "TG_ADMIN_CHAT_ID")]
     tg_admin_chat_id: Option<String>,
+
+    /// Tochka Bank JWT token for SBP payments.
+    #[arg(long, env = "TOCHKA_JWT")]
+    tochka_jwt: Option<String>,
+
+    /// Tochka Bank merchant ID.
+    #[arg(long, env = "TOCHKA_MERCHANT_ID")]
+    tochka_merchant_id: Option<String>,
+
+    /// Tochka Bank legal entity ID.
+    #[arg(long, env = "TOCHKA_LEGAL_ID")]
+    tochka_legal_id: Option<String>,
+
+    /// Hysteria2 QUIC listen port (0 = disabled).
+    /// Clients can connect with `--transport hysteria` or official Hysteria2 clients.
+    #[arg(long, env = "HYSTERIA_PORT", default_value_t = 8443)]
+    hysteria_port: u16,
+
+    /// Hysteria2 authentication password.
+    /// Defaults to the VPN pre-shared key (`--psk`) when not set.
+    #[arg(long, env = "HYSTERIA_PASSWORD")]
+    hysteria_password: Option<String>,
+
+    /// Salamander obfuscation password for Hysteria2 (optional).
+    /// When set, QUIC packets are XOR-obfuscated with BLAKE2b; both server
+    /// and client must use the same password.
+    #[arg(long, env = "HYSTERIA_OBFS")]
+    hysteria_obfs: Option<String>,
 
     /// Disable the TUI dashboard.  Useful under SSH, systemd or in CI.
     #[arg(long, default_value_t = false)]
@@ -198,9 +229,12 @@ async fn main() -> Result<()> {
         ws_peers:    DashMap::new(),
         tun_inject:  tun_inject_tx,
         pool,
-        jwt_secret:      args.jwt_secret.clone(),
-        tg_bot_token:    args.tg_bot_token.clone(),
-        tg_admin_chat_id: args.tg_admin_chat_id.clone(),
+        jwt_secret:          args.jwt_secret.clone(),
+        tg_bot_token:        args.tg_bot_token.clone(),
+        tg_admin_chat_id:    args.tg_admin_chat_id.clone(),
+        tochka_jwt:          args.tochka_jwt.clone(),
+        tochka_merchant_id:  args.tochka_merchant_id.clone(),
+        tochka_legal_id:     args.tochka_legal_id.clone(),
     });
     state.push_log(format!("TUN up — {VPN_SERVER_IP}/24"));
 
@@ -258,6 +292,25 @@ async fn main() -> Result<()> {
         });
     }
 
+    // ── Hysteria2 QUIC server ─────────────────────────────────────────────────
+    {
+        let hysteria_cfg = hysteria_server::HysteriaConfig {
+            port: args.hysteria_port,
+            password: args.hysteria_password.clone().unwrap_or_else(|| args.psk.clone()),
+            obfs_password: args.hysteria_obfs.clone(),
+            max_download_mbps: 0,
+            max_upload_mbps: 0,
+        };
+        let s = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = hysteria_server::run_hysteria_server(hysteria_cfg, s).await {
+                tracing::error!("Hysteria2 server error: {e:#}");
+            }
+        });
+        info!("Hysteria2 QUIC on :{}", args.hysteria_port);
+        state.push_log(format!("Hysteria2 on :{}", args.hysteria_port));
+    }
+
     // ── HTTP API ──────────────────────────────────────────────────────────────
     let app = Router::new()
         // ── Auth ──────────────────────────────────────────────────────────────
@@ -275,13 +328,41 @@ async fn main() -> Result<()> {
         .route("/api/peers/register",    post(api::api_register))
         .route("/api/peers/:ip",         delete(api::api_remove_peer))
         .route("/api/peers/:ip/limit",   put(api::api_set_limit))
+        // ── SBP Payments ──────────────────────────────────────────────────────
+        .route("/payment/sbp/create",              post(payment_api::create_sbp_payment))
+        .route("/payment/sbp/status/:id",          get(payment_api::get_payment_status))
+        .route("/payment/webhook",                 post(payment_api::payment_webhook))
+        .route("/payment/history",                 get(payment_api::payment_history))
+        // ── Referral system ───────────────────────────────────────────────────
+        .route("/referral/stats",                  get(referral_api::referral_stats))
+        .route("/referral/withdraw",               post(referral_api::request_withdrawal))
+        .route("/referral/withdrawals",            get(referral_api::list_withdrawals))
         // ── Admin endpoints ───────────────────────────────────────────────────
-        .route("/admin/request-code",    post(admin_api::request_code))
-        .route("/admin/verify-code",     post(admin_api::verify_code))
-        .route("/admin/promos",          post(admin_api::create_promo))
-        .route("/admin/users",           get(admin_api::list_users))
-        .route("/admin/users/:id/limit", put(admin_api::set_user_limit))
-        .route("/admin/peers",           get(admin_api::list_peers))
+        .route("/admin/request-code",              post(admin_api::request_code))
+        .route("/admin/verify-code",               post(admin_api::verify_code))
+        .route("/admin/promos",                    post(admin_api::create_promo))
+        .route("/admin/promos/list",               get(admin_api::list_promos))
+        .route("/admin/promos/:id",                delete(admin_api::delete_promo))
+        .route("/admin/users",                     get(admin_api::list_users))
+        .route("/admin/users/:id/limit",           put(admin_api::set_user_limit))
+        .route("/admin/users/:id/ban",             put(admin_api::ban_user))
+        .route("/admin/peers",                     get(admin_api::list_peers))
+        .route("/admin/stats",                     get(referral_api::admin_stats))
+        .route("/admin/payments",                  get(payment_api::admin_list_payments))
+        .route("/admin/payment/:id/confirm",       post(payment_api::admin_confirm_payment))
+        .route("/admin/referral/withdrawals",      get(referral_api::admin_list_withdrawals))
+        .route("/admin/referral/withdrawals/:id/approve", put(referral_api::admin_approve_withdrawal))
+        .route("/admin/referral/withdrawals/:id/reject",  put(referral_api::admin_reject_withdrawal))
+        .route("/admin/plans",                     get(referral_api::admin_list_plans))
+        .route("/admin/plans/:key/price",          put(referral_api::admin_update_plan_price))
+        // ── App release management ────────────────────────────────────────────
+        .route("/admin/releases",                  get(admin_api::list_releases))
+        .route("/admin/releases",                  post(admin_api::create_release))
+        .route("/admin/releases/:id/latest",       put(admin_api::set_release_latest))
+        .route("/admin/releases/:id",              delete(admin_api::delete_release))
+        // ── Public version check (auto-update) ────────────────────────────────
+        .route("/api/version/:platform",           get(admin_api::latest_version))
+        .route("/api/versions",                    get(admin_api::all_latest_versions))
         // ── WebSocket VPN tunnel (firewall-bypass transport) ──────────────────
         .route("/ws-tunnel", get(ws_tunnel::ws_handler))
         // CORS: allow all origins so web-based admin panels can talk to the API

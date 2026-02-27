@@ -1,0 +1,35 @@
+FROM rust:1.82-bookworm AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev linux-headers-amd64 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock ./
+COPY vpn-common ./vpn-common
+COPY vpn-server ./vpn-server
+COPY vpn-client ./vpn-client
+
+# Build release binary
+RUN cargo build --release -p vpn-server
+
+# ── Runtime image ─────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates iproute2 iptables \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/vpn-server /usr/local/bin/vpn-server
+
+# Copy SQL migrations
+COPY migrations /app/migrations
+
+WORKDIR /app
+
+EXPOSE 8080 51820/udp 8388
+
+CMD ["/usr/local/bin/vpn-server"]

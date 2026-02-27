@@ -27,6 +27,7 @@ use crate::{
     state::Shared,
 };
 
+
 /// Convenience type alias for API handler results.
 type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
 
@@ -71,9 +72,23 @@ pub async fn register(
 
     // Hash password (Argon2id, random salt)
     let hash = hash_password(&req.password)?;
-    let user = db::create_user(&s.pool, login, &hash)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Create user — optionally linking a referral code
+    let user = if let Some(ref ref_code) = req.referral_code {
+        if !ref_code.is_empty() {
+            db::create_user_with_referral(&s.pool, login, &hash, ref_code)
+                .await
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        } else {
+            db::create_user(&s.pool, login, &hash)
+                .await
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        }
+    } else {
+        db::create_user(&s.pool, login, &hash)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
 
     info!("Registered user: {}", user.login);
     s.push_log(format!("New user registered: {}", user.login));
@@ -133,43 +148,62 @@ pub async fn me(
 
 /// `GET /subscription/plans` — list all available subscription tiers.
 ///
-/// Public endpoint — no authentication required.  Returns the static
-/// [`PLANS`] array as JSON.
-pub async fn list_plans() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "plans": PLANS }))
+/// Returns plans from the DB (with admin-configured prices) if available,
+/// otherwise falls back to the static list.
+pub async fn list_plans(State(s): State<Shared>) -> Json<serde_json::Value> {
+    match db::list_db_plans(&s.pool).await {
+        Ok(plans) if !plans.is_empty() => Json(serde_json::json!({ "plans": plans })),
+        _ => Json(serde_json::json!({ "plans": PLANS })),
+    }
 }
 
-/// `POST /subscription/buy` — purchase a subscription plan.
+/// `POST /subscription/buy` — purchase a subscription plan from balance.
 ///
 /// Deducts the plan price from the user's balance and activates (or extends)
-/// their subscription.  Returns `402 Payment Required` if the balance is
-/// insufficient.
-///
-/// If the subscription is already active, the remaining time is preserved and
-/// the new duration is added on top (no wasted days when renewing early).
+/// their subscription. Applies 50% first-purchase discount for referred users.
 pub async fn buy_subscription(
     State(s): State<Shared>,
     AuthUser(claims): AuthUser,
     Json(req): Json<BuySubscriptionRequest>,
 ) -> ApiResult<serde_json::Value> {
-    // Validate the requested plan ID
-    let plan = PLANS
-        .iter()
-        .find(|p| p.id == req.plan_id)
-        .ok_or(err(StatusCode::BAD_REQUEST, "Unknown plan"))?;
-
     let user = db::find_user_by_id(&s.pool, claims.sub)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or(err(StatusCode::NOT_FOUND, "User not found"))?;
 
+    // Try DB plans first, fall back to static
+    let (plan_name, mut price_rub, speed_mbps, duration_days) =
+        match db::get_plan_by_key(&s.pool, &req.plan_id).await {
+            Ok(Some(p)) => (p.name, p.price_rub, p.speed_mbps, p.duration_days as i64),
+            _ => {
+                // Fallback to static plans
+                let plan = PLANS
+                    .iter()
+                    .find(|p| p.id == req.plan_id)
+                    .ok_or(err(StatusCode::BAD_REQUEST, "Unknown plan"))?;
+                (plan.name.to_string(), plan.price_rub, plan.speed_mbps, plan.duration_days)
+            }
+        };
+
+    // Apply 50% first-purchase discount for referred users
+    let has_discount = db::has_first_purchase_discount(&s.pool, claims.sub)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let discount_note = if has_discount {
+        price_rub *= 0.5;
+        " (50% скидка для новых клиентов)"
+    } else {
+        ""
+    };
+
     // Balance check before attempting the purchase
-    if user.balance < plan.price_rub {
+    if user.balance < price_rub {
         return Err(err(
             StatusCode::PAYMENT_REQUIRED,
             format!(
                 "Insufficient balance: {:.2} RUB needed, {:.2} RUB available",
-                plan.price_rub, user.balance
+                price_rub, user.balance
             ),
         ));
     }
@@ -177,28 +211,40 @@ pub async fn buy_subscription(
     let expires_at = db::activate_subscription(
         &s.pool,
         claims.sub,
-        plan.id,
-        plan.price_rub,
-        plan.speed_mbps,
-        plan.duration_days,
+        &req.plan_id,
+        price_rub,
+        speed_mbps,
+        duration_days,
     )
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    info!("User {} bought plan {}", user.login, plan.id);
+    // Mark first purchase done (for discount tracking)
+    if has_discount {
+        sqlx::query("UPDATE users SET first_purchase_done = TRUE WHERE id = $1")
+            .bind(claims.sub)
+            .execute(&s.pool)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    info!("User {} bought plan {}{}", user.login, req.plan_id, discount_note);
     s.push_log(format!(
-        "User {} → plan {} until {}",
+        "User {} → plan {} until {} (paid {:.2} RUB{})",
         user.login,
-        plan.id,
-        expires_at.format("%Y-%m-%d")
+        req.plan_id,
+        expires_at.format("%Y-%m-%d"),
+        price_rub,
+        discount_note,
     ));
 
     Ok(Json(serde_json::json!({
         "status": "ok",
-        "plan": plan.name,
+        "plan": plan_name,
         "expires_at": expires_at,
-        // Note: balance_after is approximate — the real deduction happens in DB
-        "balance_after": user.balance - plan.price_rub,
+        "price_paid": price_rub,
+        "balance_after": user.balance - price_rub,
+        "discount_applied": has_discount,
     })))
 }
 
@@ -263,17 +309,35 @@ pub async fn apply_promo(
         }
     }
 
-    // Check global use limit
-    if promo.used_count >= promo.max_uses {
+    // Check global use limit (0 = unlimited)
+    if promo.max_uses > 0 && promo.used_count >= promo.max_uses {
         return Err(err(StatusCode::GONE, "Promo code already fully used"));
     }
 
-    // Check per-user uniqueness
-    if db::has_user_used_promo(&s.pool, claims.sub, promo.id)
+    // Check individual target restriction
+    if let Some(target_id) = promo.target_user_id {
+        if target_id != claims.sub {
+            return Err(err(StatusCode::FORBIDDEN, "This promo code is not for your account"));
+        }
+    }
+
+    // Check first-purchase restriction
+    if promo.only_new_users {
+        let user = db::find_user_by_id(&s.pool, claims.sub)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or(err(StatusCode::NOT_FOUND, "User not found"))?;
+        if user.first_purchase_done {
+            return Err(err(StatusCode::FORBIDDEN, "This promo is only for new users"));
+        }
+    }
+
+    // Check per-user use count vs max_uses_per_user
+    let user_uses = db::count_user_promo_uses(&s.pool, claims.sub, promo.id)
         .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    {
-        return Err(err(StatusCode::CONFLICT, "You already used this promo code"));
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if user_uses >= promo.max_uses_per_user as i64 {
+        return Err(err(StatusCode::CONFLICT, "You have already used this promo code the maximum number of times"));
     }
 
     // Apply effects to the user's account
@@ -281,21 +345,34 @@ pub async fn apply_promo(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Record the redemption so the user cannot apply the same code again
+    // Record the redemption
     db::record_promo_use(&s.pool, claims.sub, promo.id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Human-readable confirmation message (Russian locale)
-    let msg = match promo.r#type.as_str() {
-        "balance"   => format!("Начислено {:.2} ₽", promo.value),
-        "free_days" => format!("Добавлено {} дней VPN", promo.value as i64),
-        "speed"     => format!(
-            "Активирован VPN {:.0} Мбит/с на {} дней",
-            promo.value, promo.extra as i64
-        ),
-        "discount"  => format!("Скидка {:.0}% на следующую подписку", promo.value),
-        _           => "Промокод применён".into(),
+    // Build human-readable confirmation message
+    let primary_msg = match promo.r#type.as_str() {
+        "balance"      => format!("Начислено {:.2} ₽", promo.value),
+        "free_days"    => format!("Добавлено {} дней VPN", promo.value as i64),
+        "speed"        => format!("Активирован VPN {:.0} Мбит/с на {} дней", promo.value, promo.extra as i64),
+        "subscription" => format!("Активирована подписка на {} дней", promo.value as i64),
+        "combo"        => format!("Начислено {:.2} ₽ + добавлено {} дней VPN", promo.value, promo.extra as i64),
+        "discount"     => format!("Скидка {:.0}% на следующую подписку", promo.value),
+        _              => "Промокод применён".into(),
+    };
+    let msg = if let Some(ref st) = promo.second_type {
+        if !st.is_empty() {
+            let extra_msg = match st.as_str() {
+                "balance"   => format!(" + начислено ещё {:.2} ₽", promo.second_value),
+                "free_days" => format!(" + {} дней VPN", promo.second_value as i64),
+                _ => String::new(),
+            };
+            format!("{}{}", primary_msg, extra_msg)
+        } else {
+            primary_msg
+        }
+    } else {
+        primary_msg
     };
 
     s.push_log(format!("Promo '{}' applied by user {}", promo.code, claims.sub));
