@@ -6,8 +6,9 @@
     "dev": "vite",
     "build": "tsc -p tsconfig.json && vite build",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:dev": "npm run tauri:icons && tauri dev",
+    "tauri:build": "npm run tauri:icons && tauri build",
+    "tauri:icons": "tauri icon src-tauri/icons/icon.svg"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",
