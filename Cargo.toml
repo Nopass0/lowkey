@@ -3,5 +3,6 @@ members = [
     "vpn-common",
     "vpn-server",
     "vpn-client",
+    "vpn-desktop/src-tauri",
 ]
 resolver = "2"

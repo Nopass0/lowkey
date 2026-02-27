@@ -18,6 +18,57 @@ function Write-Ok([string]$msg)    { Write-Host "[ OK ]  $msg" -ForegroundColor 
 function Write-Warn([string]$msg)  { Write-Host "[WARN]  $msg" -ForegroundColor Yellow }
 function Write-Err([string]$msg)   { Write-Host "[ERR ]  $msg" -ForegroundColor Red }
 
+
+function Ensure-NodeToolchain {
+    $requiredMajor = 20
+
+    $nvmCmd = Get-Command nvm -ErrorAction SilentlyContinue
+    if (-not $nvmCmd) {
+        $nvmHome = if ($env:NVM_HOME) { $env:NVM_HOME } else { Join-Path $env:APPDATA "nvm" }
+        $nvmExe = Join-Path $nvmHome "nvm.exe"
+        if (Test-Path $nvmExe) {
+            $env:Path = "$nvmHome;$env:Path"
+            $nvmCmd = Get-Command nvm -ErrorAction SilentlyContinue
+        }
+    }
+
+    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+    $currentMajor = $null
+    if ($nodeCmd) {
+        try {
+            $nodeVersionRaw = (& node -v).Trim()
+            if ($nodeVersionRaw.StartsWith("v")) { $nodeVersionRaw = $nodeVersionRaw.Substring(1) }
+            $currentMajor = [int]($nodeVersionRaw.Split(".")[0])
+        } catch {
+            $currentMajor = $null
+        }
+    }
+
+    if ($nvmCmd -and (-not $currentMajor -or $currentMajor -lt $requiredMajor)) {
+        Write-Info "Switching Node.js to latest v$requiredMajor via nvm..."
+        & nvm install $requiredMajor
+        if ($LASTEXITCODE -ne 0) { Write-Err "nvm install failed"; exit 1 }
+        & nvm use $requiredMajor
+        if ($LASTEXITCODE -ne 0) { Write-Err "nvm use failed"; exit 1 }
+    }
+    elseif (-not $nvmCmd) {
+        Write-Warn "nvm not found; using current system Node.js"
+    }
+
+    if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+        Write-Err "Node.js not found. Install nvm + Node.js 20+"
+        exit 1
+    }
+
+    if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+        Write-Err "npm not found. Install Node.js with npm"
+        exit 1
+    }
+
+    Write-Ok "Node.js $(& node --version)"
+    Write-Ok "npm $(& npm --version)"
+}
+
 function Install-NpmDeps {
     param([string]$TargetDir)
 
@@ -60,10 +111,7 @@ function Build-Web {
 
     $WebDir = Join-Path $ScriptDir "web"
     if (-not (Test-Path $WebDir)) { Write-Err "web\ not found"; exit 1 }
-    if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-        Write-Err "Node.js not found. Install from https://nodejs.org"
-        exit 1
-    }
+    Ensure-NodeToolchain
 
     Install-NpmDeps -TargetDir $WebDir
 
@@ -86,10 +134,7 @@ function Build-Desktop {
 
     $DesktopDir = Join-Path $ScriptDir "vpn-desktop"
     if (-not (Test-Path $DesktopDir)) { Write-Err "vpn-desktop\ not found"; exit 1 }
-    if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-        Write-Err "Node.js not found. Install from https://nodejs.org"
-        exit 1
-    }
+    Ensure-NodeToolchain
 
     Install-NpmDeps -TargetDir $DesktopDir
 
