@@ -37,6 +37,84 @@ warn()    { echo -e "${YEL}[WARN]${RST}  $*"; }
 err()     { echo -e "${RED}[ERR ]${RST}  $*" >&2; }
 section() { echo -e "\n${CYN}══ $* ══${RST}"; }
 
+source_nvm() {
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+
+    if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+        # shellcheck disable=SC1090
+        source "$NVM_DIR/nvm.sh"
+        return 0
+    fi
+
+    return 1
+}
+
+ensure_latest_node() {
+    if ! source_nvm; then
+        info "nvm not found, installing it to manage Node.js versions..."
+        curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+        if ! source_nvm; then
+            err "Failed to load nvm after installation."
+            return 1
+        fi
+    fi
+
+    info "Installing latest stable Node.js via nvm (this may take a moment)..."
+    nvm install node >/dev/null
+    nvm alias default node >/dev/null
+    nvm use default >/dev/null
+
+    local nver
+    nver=$(node --version 2>&1)
+    ok "Using Node.js $nver (default)"
+}
+
+kill_port_listeners() {
+    local proto="$1"
+    local port="$2"
+    local label="$3"
+    local pids=""
+
+    if command -v lsof &>/dev/null; then
+        if [[ "$proto" == "tcp" ]]; then
+            pids=$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u | tr '\n' ' ')
+        else
+            pids=$(lsof -t -iUDP:"$port" 2>/dev/null | sort -u | tr '\n' ' ')
+        fi
+    fi
+
+    if [[ -z "$pids" ]] && command -v fuser &>/dev/null; then
+        if [[ "$proto" == "tcp" ]]; then
+            pids=$(fuser -n tcp "$port" 2>/dev/null | tr ' ' '\n' | sort -u | tr '\n' ' ')
+        else
+            pids=$(fuser -n udp "$port" 2>/dev/null | tr ' ' '\n' | sort -u | tr '\n' ' ')
+        fi
+    fi
+
+    if [[ -n "$pids" ]]; then
+        warn "Port $port/$proto ($label) is busy. Stopping processes: $pids"
+        # shellcheck disable=SC2086
+        kill -TERM $pids 2>/dev/null || true
+        sleep 1
+        # shellcheck disable=SC2086
+        kill -KILL $pids 2>/dev/null || true
+        ok "Freed $port/$proto for $label"
+    fi
+}
+
+free_dev_ports() {
+    local api_port="${API_PORT:-8080}"
+    local udp_port="${UDP_PORT:-51820}"
+    local proxy_port="${PROXY_PORT:-8388}"
+    local web_port="${WEB_PORT:-3000}"
+
+    info "Ensuring required ports are free before startup..."
+    kill_port_listeners tcp "$api_port" "HTTP API"
+    kill_port_listeners udp "$udp_port" "UDP VPN"
+    kill_port_listeners tcp "$proxy_port" "TCP proxy"
+    kill_port_listeners tcp "$web_port" "Next.js web"
+}
+
 # ── Dependency checks ─────────────────────────────────────────────────────────
 
 check_deps() {
@@ -55,10 +133,10 @@ check_deps() {
         nver=$(node --version 2>&1)
         local nmaj
         nmaj=$(echo "$nver" | tr -d 'v' | cut -d. -f1)
-        if [[ "$nmaj" -ge 18 ]]; then
+        if [[ "$nmaj" -ge 20 ]]; then
             ok "Node.js $nver"
         else
-            warn "Node.js $nver found, but >= 18 recommended"
+            warn "Node.js $nver found, but >= 20 is required for the current web stack"
         fi
     else
         err "Node.js not found. Install from https://nodejs.org"
@@ -124,14 +202,8 @@ setup_dev() {
     fi
     ok "Rust ready."
 
-    # Node via nvm or direct
-    if ! command -v node &>/dev/null; then
-        if command -v nvm &>/dev/null; then
-            nvm install --lts && nvm use --lts
-        else
-            warn "Node.js not found. Install from https://nodejs.org (>= 18)"
-        fi
-    fi
+    # Node via nvm (latest default)
+    ensure_latest_node
 
     # Web dependencies
     section "Installing web dependencies"
@@ -179,6 +251,7 @@ start_server() {
     section "Starting VPN server (dev mode)"
     cd "$SCRIPT_DIR"
     load_env
+    free_dev_ports
 
     if [[ $EUID -ne 0 ]]; then
         warn "Running server without root privileges."
@@ -199,12 +272,15 @@ start_web() {
     section "Starting Next.js web (dev mode)"
     cd "$SCRIPT_DIR/web"
 
+    ensure_latest_node
+    free_dev_ports
+
     install_npm_deps "$SCRIPT_DIR/web"
 
     export NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://localhost:${API_PORT:-8080}}"
-    info "Web running at http://localhost:3000"
+    info "Web running at http://localhost:${WEB_PORT:-3000}"
     info "API proxied to $NEXT_PUBLIC_API_URL"
-    npm run dev
+    npm run dev -- --port "${WEB_PORT:-3000}"
 }
 
 # ── Start Tauri desktop in dev mode ───────────────────────────────────────────
@@ -212,6 +288,8 @@ start_web() {
 start_desktop() {
     section "Starting Tauri desktop (dev mode)"
     cd "$SCRIPT_DIR/vpn-desktop"
+
+    ensure_latest_node
 
     install_npm_deps "$SCRIPT_DIR/vpn-desktop"
 
