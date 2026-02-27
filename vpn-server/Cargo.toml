@@ -41,3 +41,7 @@ reqwest      = { version = "0.12", default-features = false, features = ["json",
 
 x25519-dalek = { version = "2",    features = ["static_secrets", "getrandom"] }
 sha2         = "0.10"
+
+# Payment / referral additions
+uuid         = { version = "1",    features = ["v4", "serde"] }
+base64       = "0.22"

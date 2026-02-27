@@ -23,19 +23,22 @@ pub struct User {
     pub balance: f64,
     /// Subscription status: `"inactive"` | `"active"` | `"expired"`.
     pub sub_status: String,
-    /// UTC timestamp when the current subscription expires (`None` if never
-    /// subscribed).
+    /// UTC timestamp when the current subscription expires (`None` if never subscribed).
     pub sub_expires_at: Option<DateTime<Utc>>,
-    /// Bandwidth cap for this user's VPN session in Mbit/s.
-    /// `0.0` means unlimited (premium plan).
+    /// Bandwidth cap for this user's VPN session in Mbit/s. `0.0` means unlimited.
     pub sub_speed_mbps: f64,
     /// Last assigned VPN IP as a string (e.g. `"10.0.0.5"`).
-    /// Persisted so the same IP is reused on reconnect.
     pub vpn_ip: Option<String>,
     /// Role: `"user"` or `"admin"`.
     pub role: String,
     /// UTC timestamp of account creation.
     pub created_at: DateTime<Utc>,
+    /// Unique referral code for this user.
+    pub referral_code: Option<String>,
+    /// Accumulated referral earnings balance in rubles.
+    pub referral_balance: f64,
+    /// Whether the user has made their first subscription purchase.
+    pub first_purchase_done: bool,
 }
 
 /// A promo code record from the `promo_codes` table.
@@ -87,6 +90,8 @@ pub struct AdminCode {
 pub struct RegisterRequest {
     pub login: String,
     pub password: String,
+    /// Optional referral code — links this user to a referrer.
+    pub referral_code: Option<String>,
 }
 
 /// Body for `POST /auth/login`.
@@ -116,6 +121,9 @@ pub struct UserPublic {
     pub sub_expires_at: Option<DateTime<Utc>>,
     pub sub_speed_mbps: f64,
     pub role: String,
+    pub referral_code: Option<String>,
+    pub referral_balance: f64,
+    pub first_purchase_done: bool,
 }
 
 /// Convert a full [`User`] row into the public-facing subset.
@@ -129,6 +137,9 @@ impl From<User> for UserPublic {
             sub_expires_at: u.sub_expires_at,
             sub_speed_mbps: u.sub_speed_mbps,
             role: u.role,
+            referral_code: u.referral_code,
+            referral_balance: u.referral_balance,
+            first_purchase_done: u.first_purchase_done,
         }
     }
 }
@@ -234,6 +245,98 @@ pub struct CreatePromoRequest {
 pub struct SetLimitRequest {
     /// New bandwidth cap in Mbit/s (`0.0` = unlimited).
     pub limit_mbps: f64,
+}
+
+// ── Payment / SBP types ───────────────────────────────────────────────────────
+
+/// A payment order from the `payments` table.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct Payment {
+    pub id: i32,
+    pub user_id: i32,
+    pub tochka_order_id: Option<String>,
+    pub amount: f64,
+    pub purpose: String,   // 'balance' | 'subscription'
+    pub plan_id: Option<String>,
+    pub status: String,    // 'pending' | 'paid' | 'expired' | 'failed'
+    pub qr_url: Option<String>,
+    pub qr_payload: Option<String>,
+    pub expires_at: Option<chrono::DateTime<Utc>>,
+    pub paid_at: Option<chrono::DateTime<Utc>>,
+    pub created_at: chrono::DateTime<Utc>,
+}
+
+/// Body for `POST /payment/sbp/create`.
+#[derive(Debug, Deserialize)]
+pub struct CreatePaymentRequest {
+    /// Amount in rubles.
+    pub amount: f64,
+    /// `"balance"` — top up balance; `"subscription"` — buy directly.
+    pub purpose: String,
+    /// Required when purpose = "subscription".
+    pub plan_id: Option<String>,
+}
+
+/// Response for `POST /payment/sbp/create`.
+#[derive(Debug, Serialize)]
+pub struct CreatePaymentResponse {
+    pub payment_id: i32,
+    pub qr_payload: String,
+    pub qr_url: Option<String>,
+    pub amount: f64,
+    pub expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+/// Response for `GET /payment/sbp/status/:id`.
+#[derive(Debug, Serialize)]
+pub struct PaymentStatusResponse {
+    pub payment_id: i32,
+    pub status: String,
+    pub amount: f64,
+    pub paid_at: Option<chrono::DateTime<Utc>>,
+    pub balance_after: Option<f64>,
+    pub sub_expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+// ── Referral types ────────────────────────────────────────────────────────────
+
+/// A withdrawal request from `withdrawal_requests` table.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct WithdrawalRequest {
+    pub id: i32,
+    pub user_id: i32,
+    pub amount: f64,
+    pub card_number: String,
+    pub bank_name: Option<String>,
+    pub tochka_payout_id: Option<String>,
+    pub status: String,    // 'pending' | 'processing' | 'completed' | 'rejected'
+    pub admin_note: Option<String>,
+    pub requested_at: chrono::DateTime<Utc>,
+    pub processed_at: Option<chrono::DateTime<Utc>>,
+}
+
+/// Body for `POST /referral/withdraw`.
+#[derive(Debug, Deserialize)]
+pub struct WithdrawRequest {
+    pub amount: f64,
+    pub card_number: String,
+    pub bank_name: Option<String>,
+}
+
+/// A subscription plan from the DB.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct DbSubscriptionPlan {
+    pub id: i32,
+    pub plan_key: String,
+    pub name: String,
+    pub price_rub: f64,
+    pub duration_days: i32,
+    pub speed_mbps: f64,
+    pub is_bundle: bool,
+    pub bundle_months: i32,
+    pub discount_pct: f64,
+    pub is_active: bool,
+    pub sort_order: i32,
 }
 
 // ── JWT claims ────────────────────────────────────────────────────────────────

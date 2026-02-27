@@ -236,6 +236,61 @@ pub async fn set_user_limit(
     })))
 }
 
+/// `GET /admin/promos/list` — list all promo codes (admin only).
+pub async fn list_promos(
+    State(s): State<Shared>,
+    AdminUser(_): AdminUser,
+) -> ApiResult<serde_json::Value> {
+    let promos = sqlx::query_as::<_, crate::models::PromoCode>(
+        "SELECT id, code, \"type\", value, extra, max_uses, used_count, expires_at, created_at \
+         FROM promo_codes ORDER BY created_at DESC",
+    )
+    .fetch_all(&s.pool)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "promos": promos })))
+}
+
+/// `DELETE /admin/promos/:id` — delete a promo code (admin only).
+pub async fn delete_promo(
+    State(s): State<Shared>,
+    AdminUser(_): AdminUser,
+    axum::extract::Path(promo_id): axum::extract::Path<i32>,
+) -> ApiResult<serde_json::Value> {
+    sqlx::query("DELETE FROM promo_codes WHERE id = $1")
+        .bind(promo_id)
+        .execute(&s.pool)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    info!("Admin deleted promo {}", promo_id);
+    Ok(Json(serde_json::json!({ "deleted": promo_id })))
+}
+
+/// `PUT /admin/users/:id/ban` — suspend or unsuspend a user (admin only).
+pub async fn ban_user(
+    State(s): State<Shared>,
+    AdminUser(_): AdminUser,
+    axum::extract::Path(user_id): axum::extract::Path<i32>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<serde_json::Value> {
+    let ban = body["ban"].as_bool().unwrap_or(true);
+    let role = if ban { "banned" } else { "user" };
+
+    sqlx::query("UPDATE users SET role = $1 WHERE id = $2")
+        .bind(role)
+        .bind(user_id)
+        .execute(&s.pool)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    info!("Admin {} user {}", if ban { "banned" } else { "unbanned" }, user_id);
+    s.push_log(format!("User {} {}", user_id, if ban { "banned" } else { "unbanned" }));
+
+    Ok(Json(serde_json::json!({ "user_id": user_id, "role": role })))
+}
+
 /// `GET /admin/peers` — list all currently connected VPN peers (admin only).
 ///
 /// Equivalent to the public `GET /api/peers` but includes additional fields

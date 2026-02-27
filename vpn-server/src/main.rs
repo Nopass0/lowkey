@@ -29,7 +29,9 @@ mod auth_middleware;
 mod dashboard;
 mod db;
 mod models;
+mod payment_api;
 mod proxy;
+mod referral_api;
 mod state;
 mod telegram;
 mod tunnel;
@@ -97,6 +99,18 @@ struct Args {
     /// Telegram admin chat ID.  The bot sends OTP codes here.
     #[arg(long, env = "TG_ADMIN_CHAT_ID")]
     tg_admin_chat_id: Option<String>,
+
+    /// Tochka Bank JWT token for SBP payments.
+    #[arg(long, env = "TOCHKA_JWT")]
+    tochka_jwt: Option<String>,
+
+    /// Tochka Bank merchant ID.
+    #[arg(long, env = "TOCHKA_MERCHANT_ID")]
+    tochka_merchant_id: Option<String>,
+
+    /// Tochka Bank legal entity ID.
+    #[arg(long, env = "TOCHKA_LEGAL_ID")]
+    tochka_legal_id: Option<String>,
 
     /// Disable the TUI dashboard.  Useful under SSH, systemd or in CI.
     #[arg(long, default_value_t = false)]
@@ -198,9 +212,12 @@ async fn main() -> Result<()> {
         ws_peers:    DashMap::new(),
         tun_inject:  tun_inject_tx,
         pool,
-        jwt_secret:      args.jwt_secret.clone(),
-        tg_bot_token:    args.tg_bot_token.clone(),
-        tg_admin_chat_id: args.tg_admin_chat_id.clone(),
+        jwt_secret:          args.jwt_secret.clone(),
+        tg_bot_token:        args.tg_bot_token.clone(),
+        tg_admin_chat_id:    args.tg_admin_chat_id.clone(),
+        tochka_jwt:          args.tochka_jwt.clone(),
+        tochka_merchant_id:  args.tochka_merchant_id.clone(),
+        tochka_legal_id:     args.tochka_legal_id.clone(),
     });
     state.push_log(format!("TUN up — {VPN_SERVER_IP}/24"));
 
@@ -275,13 +292,33 @@ async fn main() -> Result<()> {
         .route("/api/peers/register",    post(api::api_register))
         .route("/api/peers/:ip",         delete(api::api_remove_peer))
         .route("/api/peers/:ip/limit",   put(api::api_set_limit))
+        // ── SBP Payments ──────────────────────────────────────────────────────
+        .route("/payment/sbp/create",              post(payment_api::create_sbp_payment))
+        .route("/payment/sbp/status/:id",          get(payment_api::get_payment_status))
+        .route("/payment/webhook",                 post(payment_api::payment_webhook))
+        .route("/payment/history",                 get(payment_api::payment_history))
+        // ── Referral system ───────────────────────────────────────────────────
+        .route("/referral/stats",                  get(referral_api::referral_stats))
+        .route("/referral/withdraw",               post(referral_api::request_withdrawal))
+        .route("/referral/withdrawals",            get(referral_api::list_withdrawals))
         // ── Admin endpoints ───────────────────────────────────────────────────
-        .route("/admin/request-code",    post(admin_api::request_code))
-        .route("/admin/verify-code",     post(admin_api::verify_code))
-        .route("/admin/promos",          post(admin_api::create_promo))
-        .route("/admin/users",           get(admin_api::list_users))
-        .route("/admin/users/:id/limit", put(admin_api::set_user_limit))
-        .route("/admin/peers",           get(admin_api::list_peers))
+        .route("/admin/request-code",              post(admin_api::request_code))
+        .route("/admin/verify-code",               post(admin_api::verify_code))
+        .route("/admin/promos",                    post(admin_api::create_promo))
+        .route("/admin/promos/list",               get(admin_api::list_promos))
+        .route("/admin/promos/:id",                delete(admin_api::delete_promo))
+        .route("/admin/users",                     get(admin_api::list_users))
+        .route("/admin/users/:id/limit",           put(admin_api::set_user_limit))
+        .route("/admin/users/:id/ban",             put(admin_api::ban_user))
+        .route("/admin/peers",                     get(admin_api::list_peers))
+        .route("/admin/stats",                     get(referral_api::admin_stats))
+        .route("/admin/payments",                  get(payment_api::admin_list_payments))
+        .route("/admin/payment/:id/confirm",       post(payment_api::admin_confirm_payment))
+        .route("/admin/referral/withdrawals",      get(referral_api::admin_list_withdrawals))
+        .route("/admin/referral/withdrawals/:id/approve", put(referral_api::admin_approve_withdrawal))
+        .route("/admin/referral/withdrawals/:id/reject",  put(referral_api::admin_reject_withdrawal))
+        .route("/admin/plans",                     get(referral_api::admin_list_plans))
+        .route("/admin/plans/:key/price",          put(referral_api::admin_update_plan_price))
         // ── WebSocket VPN tunnel (firewall-bypass transport) ──────────────────
         .route("/ws-tunnel", get(ws_tunnel::ws_handler))
         // CORS: allow all origins so web-based admin panels can talk to the API

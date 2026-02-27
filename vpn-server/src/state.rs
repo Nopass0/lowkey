@@ -288,6 +288,17 @@ pub struct ServerState {
     /// Telegram chat ID of the admin who receives OTP codes.  `None` if admin
     /// OTP is disabled.
     pub tg_admin_chat_id: Option<String>,
+
+    // ── Tochka Bank SBP payment integration ───────────────────────────────────
+
+    /// Tochka Bank JWT token for SBP API authentication.
+    pub tochka_jwt: Option<String>,
+
+    /// Tochka Bank merchant ID.
+    pub tochka_merchant_id: Option<String>,
+
+    /// Tochka Bank legal entity ID.
+    pub tochka_legal_id: Option<String>,
 }
 
 impl ServerState {

@@ -27,6 +27,7 @@ use crate::{
     state::Shared,
 };
 
+
 /// Convenience type alias for API handler results.
 type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
 
@@ -71,9 +72,23 @@ pub async fn register(
 
     // Hash password (Argon2id, random salt)
     let hash = hash_password(&req.password)?;
-    let user = db::create_user(&s.pool, login, &hash)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Create user — optionally linking a referral code
+    let user = if let Some(ref ref_code) = req.referral_code {
+        if !ref_code.is_empty() {
+            db::create_user_with_referral(&s.pool, login, &hash, ref_code)
+                .await
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        } else {
+            db::create_user(&s.pool, login, &hash)
+                .await
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        }
+    } else {
+        db::create_user(&s.pool, login, &hash)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
 
     info!("Registered user: {}", user.login);
     s.push_log(format!("New user registered: {}", user.login));
@@ -133,43 +148,62 @@ pub async fn me(
 
 /// `GET /subscription/plans` — list all available subscription tiers.
 ///
-/// Public endpoint — no authentication required.  Returns the static
-/// [`PLANS`] array as JSON.
-pub async fn list_plans() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "plans": PLANS }))
+/// Returns plans from the DB (with admin-configured prices) if available,
+/// otherwise falls back to the static list.
+pub async fn list_plans(State(s): State<Shared>) -> Json<serde_json::Value> {
+    match db::list_db_plans(&s.pool).await {
+        Ok(plans) if !plans.is_empty() => Json(serde_json::json!({ "plans": plans })),
+        _ => Json(serde_json::json!({ "plans": PLANS })),
+    }
 }
 
-/// `POST /subscription/buy` — purchase a subscription plan.
+/// `POST /subscription/buy` — purchase a subscription plan from balance.
 ///
 /// Deducts the plan price from the user's balance and activates (or extends)
-/// their subscription.  Returns `402 Payment Required` if the balance is
-/// insufficient.
-///
-/// If the subscription is already active, the remaining time is preserved and
-/// the new duration is added on top (no wasted days when renewing early).
+/// their subscription. Applies 50% first-purchase discount for referred users.
 pub async fn buy_subscription(
     State(s): State<Shared>,
     AuthUser(claims): AuthUser,
     Json(req): Json<BuySubscriptionRequest>,
 ) -> ApiResult<serde_json::Value> {
-    // Validate the requested plan ID
-    let plan = PLANS
-        .iter()
-        .find(|p| p.id == req.plan_id)
-        .ok_or(err(StatusCode::BAD_REQUEST, "Unknown plan"))?;
-
     let user = db::find_user_by_id(&s.pool, claims.sub)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or(err(StatusCode::NOT_FOUND, "User not found"))?;
 
+    // Try DB plans first, fall back to static
+    let (plan_name, mut price_rub, speed_mbps, duration_days) =
+        match db::get_plan_by_key(&s.pool, &req.plan_id).await {
+            Ok(Some(p)) => (p.name, p.price_rub, p.speed_mbps, p.duration_days as i64),
+            _ => {
+                // Fallback to static plans
+                let plan = PLANS
+                    .iter()
+                    .find(|p| p.id == req.plan_id)
+                    .ok_or(err(StatusCode::BAD_REQUEST, "Unknown plan"))?;
+                (plan.name.to_string(), plan.price_rub, plan.speed_mbps, plan.duration_days)
+            }
+        };
+
+    // Apply 50% first-purchase discount for referred users
+    let has_discount = db::has_first_purchase_discount(&s.pool, claims.sub)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let discount_note = if has_discount {
+        price_rub *= 0.5;
+        " (50% скидка для новых клиентов)"
+    } else {
+        ""
+    };
+
     // Balance check before attempting the purchase
-    if user.balance < plan.price_rub {
+    if user.balance < price_rub {
         return Err(err(
             StatusCode::PAYMENT_REQUIRED,
             format!(
                 "Insufficient balance: {:.2} RUB needed, {:.2} RUB available",
-                plan.price_rub, user.balance
+                price_rub, user.balance
             ),
         ));
     }
@@ -177,28 +211,40 @@ pub async fn buy_subscription(
     let expires_at = db::activate_subscription(
         &s.pool,
         claims.sub,
-        plan.id,
-        plan.price_rub,
-        plan.speed_mbps,
-        plan.duration_days,
+        &req.plan_id,
+        price_rub,
+        speed_mbps,
+        duration_days,
     )
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    info!("User {} bought plan {}", user.login, plan.id);
+    // Mark first purchase done (for discount tracking)
+    if has_discount {
+        sqlx::query("UPDATE users SET first_purchase_done = TRUE WHERE id = $1")
+            .bind(claims.sub)
+            .execute(&s.pool)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    info!("User {} bought plan {}{}", user.login, req.plan_id, discount_note);
     s.push_log(format!(
-        "User {} → plan {} until {}",
+        "User {} → plan {} until {} (paid {:.2} RUB{})",
         user.login,
-        plan.id,
-        expires_at.format("%Y-%m-%d")
+        req.plan_id,
+        expires_at.format("%Y-%m-%d"),
+        price_rub,
+        discount_note,
     ));
 
     Ok(Json(serde_json::json!({
         "status": "ok",
-        "plan": plan.name,
+        "plan": plan_name,
         "expires_at": expires_at,
-        // Note: balance_after is approximate — the real deduction happens in DB
-        "balance_after": user.balance - plan.price_rub,
+        "price_paid": price_rub,
+        "balance_after": user.balance - price_rub,
+        "discount_applied": has_discount,
     })))
 }
 
