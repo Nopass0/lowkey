@@ -17,9 +17,20 @@ err()  { echo -e "${RED}[ERR ]${RST}  $*" >&2; }
 
 ensure_js_tooling() {
     if ! command -v node &>/dev/null; then
-        err "Node.js is required but not installed (need Node.js 18+)"
+        err "Node.js is required but not installed (need Node.js 20+)"
         exit 1
     fi
+
+    local node_version
+    local node_major
+    node_version="$(node --version 2>/dev/null || true)"
+    node_major="$(echo "$node_version" | tr -d 'v' | cut -d. -f1)"
+    if [[ -z "$node_major" || "$node_major" -lt 20 ]]; then
+        err "Node.js 20+ is required, found $node_version"
+        err "Install newer Node.js or run through nvm (nvm install 20 && nvm use 20)"
+        exit 1
+    fi
+
     if ! command -v npm &>/dev/null; then
         err "npm is required but not installed"
         exit 1

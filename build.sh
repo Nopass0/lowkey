@@ -58,7 +58,16 @@ ensure_js_tooling() {
     fi
 
     if command -v node &>/dev/null; then
-        ok "Node.js $(node --version 2>/dev/null || true)"
+        local node_version
+        local node_major
+        node_version="$(node --version 2>/dev/null || true)"
+        node_major="$(echo "$node_version" | tr -d 'v' | cut -d. -f1)"
+        ok "Node.js $node_version"
+        if [[ -z "$node_major" || "$node_major" -lt 20 ]]; then
+            echo -e "${RED}ERROR: Node.js 20+ is required, found $node_version.${RST}"
+            echo "  Install nvm and run: nvm install 20 && nvm use 20"
+            exit 1
+        fi
     else
         echo -e "${RED}ERROR: Node.js is required but not installed.${RST}"
         echo "  Install nvm + Node.js 20+ from https://nodejs.org"
