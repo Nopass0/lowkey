@@ -60,12 +60,20 @@ function Ensure-NodeToolchain {
         exit 1
     }
 
+    $currentVersionRaw = (& node --version).Trim()
+    $currentVersionForCheck = if ($currentVersionRaw.StartsWith("v")) { $currentVersionRaw.Substring(1) } else { $currentVersionRaw }
+    $currentMajorNow = [int]($currentVersionForCheck.Split(".")[0])
+    if ($currentMajorNow -lt $requiredMajor) {
+        Write-Err "Node.js $requiredMajor+ is required, found $currentVersionRaw"
+        exit 1
+    }
+
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
         Write-Err "npm not found. Install Node.js with npm"
         exit 1
     }
 
-    Write-Ok "Node.js $(& node --version)"
+    Write-Ok "Node.js $currentVersionRaw"
     Write-Ok "npm $(& npm --version)"
 }
 
@@ -138,10 +146,14 @@ function Build-Desktop {
 
     Install-NpmDeps -TargetDir $DesktopDir
 
-    # Try npm run tauri build first, then fall back to npx
-    $tauriCmd = if (Get-Command "npx" -ErrorAction SilentlyContinue) { "npx tauri build" } else { "npm run tauri build" }
-    Write-Info "Running: $tauriCmd"
-    Invoke-Expression $tauriCmd
+    Write-Info "Running: npm run tauri:build"
+    & npm run tauri:build
+    if ($LASTEXITCODE -ne 0) {
+        if (Get-Command "npx" -ErrorAction SilentlyContinue) {
+            Write-Warn "npm run tauri:build failed, retrying with npx tauri build..."
+            & npx tauri build
+        }
+    }
     if ($LASTEXITCODE -ne 0) { Write-Err "Tauri build failed"; exit 1 }
 
     $DesktopDist = Join-Path $ScriptDir "dist\desktop"

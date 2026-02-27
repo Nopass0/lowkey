@@ -23,6 +23,14 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
+$nodeVersionRaw = (& node -v).Trim()
+$nodeVersionForCheck = if ($nodeVersionRaw.StartsWith("v")) { $nodeVersionRaw.Substring(1) } else { $nodeVersionRaw }
+$nodeMajor = [int]($nodeVersionForCheck.Split(".")[0])
+if ($nodeMajor -lt 20) {
+    Write-Err "Node.js 20+ is required, found $nodeVersionRaw"
+    exit 1
+}
+
 Set-Location $WebDir
 
 # Load .env for API URL
