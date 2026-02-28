@@ -12,8 +12,11 @@ COPY Cargo.toml Cargo.lock ./
 COPY vpn-common ./vpn-common
 COPY vpn-server ./vpn-server
 COPY vpn-client ./vpn-client
-# vpn-desktop/src-tauri is a workspace member — must be present for Cargo
-COPY vpn-desktop/src-tauri/Cargo.toml ./vpn-desktop/src-tauri/Cargo.toml
+# vpn-desktop/src-tauri is a workspace member — generate a stub Cargo.toml so
+# `cargo build -p vpn-server` succeeds without the full desktop crate sources.
+RUN mkdir -p vpn-desktop/src-tauri && \
+    printf '[package]\nname = "lowkey-vpn-desktop"\nversion = "0.0.0"\nedition = "2021"\n\n[lib]\nname = "app_lib"\ncrate-type = ["cdylib"]\n\n[dependencies]\n' \
+    > vpn-desktop/src-tauri/Cargo.toml
 
 # Build release binary
 RUN cargo build --release -p vpn-server
