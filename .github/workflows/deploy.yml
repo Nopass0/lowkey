@@ -109,7 +109,7 @@ jobs:
           sshpass -p "${{ secrets.SERVER_PASSWORD }}" \
             ssh -o StrictHostKeyChecking=no \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
-            'cd /opt/lowkey && docker compose up -d --build --remove-orphans 2>&1 | tail -40 && echo "Services started"'
+            'cd /opt/lowkey && docker compose build --no-cache 2>&1 | tail -50 && docker compose up -d --remove-orphans && echo "Services started"'
 
       - name: Wait for services and verify
         run: |
