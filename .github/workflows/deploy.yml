@@ -107,7 +107,7 @@ jobs:
       - name: Build and start Docker Compose services
         run: |
           sshpass -p "${{ secrets.SERVER_PASSWORD }}" \
-            ssh -o StrictHostKeyChecking=no \
+            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60 \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} '
             set -e
             cd /opt/lowkey
