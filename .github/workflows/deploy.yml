@@ -9,6 +9,8 @@ env:
   SERVER_HOST: 89.169.54.87
   SERVER_USER: root
   DEPLOY_DIR: /opt/lowkey
+  # Public key is not sensitive — safe to embed in the workflow
+  DEPLOY_PUBKEY: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIjhCBRiFDH6/B7oFvTbezye5PL3IeiQmkoz4qQf8K1H github-actions-deploy"
 
 jobs:
   deploy:
@@ -25,14 +27,14 @@ jobs:
 
       - name: Bootstrap SSH key on server (idempotent)
         run: |
-          # Add our deploy key to authorized_keys using password auth (first-time setup)
-          PUB_KEY=$(echo "${{ secrets.SSH_PRIVATE_KEY }}" | ssh-keygen -y -f /dev/stdin 2>/dev/null || true)
-          if [ -n "$PUB_KEY" ]; then
-            sshpass -p "${{ secrets.SERVER_PASSWORD }}" \
-              ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-              ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
-              "mkdir -p ~/.ssh; grep -qF '$PUB_KEY' ~/.ssh/authorized_keys 2>/dev/null || echo '$PUB_KEY' >> ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; echo 'SSH key OK'"
-          fi
+          sshpass -p "${{ secrets.SERVER_PASSWORD }}" \
+            ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
+            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
+             grep -qF '${{ env.DEPLOY_PUBKEY }}' ~/.ssh/authorized_keys 2>/dev/null \
+               || echo '${{ env.DEPLOY_PUBKEY }}' >> ~/.ssh/authorized_keys && \
+             chmod 600 ~/.ssh/authorized_keys && \
+             echo 'SSH key bootstrap OK'"
 
       - name: Set up SSH key
         run: |
@@ -51,13 +53,14 @@ jobs:
             fi
             rm -rf /opt/lowkey
             mkdir -p /opt/lowkey
+            echo "Old deployment removed"
           '
 
       - name: Clone fresh code
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
-            'git clone --depth=1 https://github.com/Nopass0/lowkey.git /opt/lowkey'
+            'git clone --depth=1 https://github.com/Nopass0/lowkey.git /opt/lowkey && echo "Cloned OK"'
 
       - name: Write .env file on server
         env:
@@ -89,18 +92,19 @@ jobs:
           scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             /tmp/deploy.env \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}:/opt/lowkey/.env
+          echo ".env written to server"
 
       - name: Install Docker if needed
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
-            'command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh && systemctl enable --now docker)'
+            'command -v docker &>/dev/null && echo "Docker already installed" || (curl -fsSL https://get.docker.com | sh && systemctl enable --now docker && echo "Docker installed")'
 
       - name: Build and start Docker Compose services
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
-            'cd /opt/lowkey && docker compose up -d --build --remove-orphans 2>&1 | tail -20'
+            'cd /opt/lowkey && docker compose up -d --build --remove-orphans 2>&1 | tail -30 && echo "Docker Compose started"'
 
       - name: Wait for services and verify
         run: |
@@ -113,29 +117,35 @@ jobs:
             'cd /opt/lowkey && docker compose ps'
 
           echo "=== API health check ==="
+          API_OK=false
           for i in $(seq 1 12); do
             if curl -sf "http://${{ env.SERVER_HOST }}:8080/subscription/plans" > /dev/null 2>&1; then
-              echo "✅ API is up at http://${{ env.SERVER_HOST }}:8080"
+              echo "API is up at http://${{ env.SERVER_HOST }}:8080"
+              API_OK=true
               break
             fi
-            echo "Attempt $i/12: API not ready yet, waiting 5s..."
+            echo "Attempt $i/12: API not ready, waiting 5s..."
             sleep 5
           done
 
           echo "=== Web health check ==="
+          WEB_OK=false
           for i in $(seq 1 12); do
             if curl -sf "http://${{ env.SERVER_HOST }}:3000" > /dev/null 2>&1; then
-              echo "✅ Web is up at http://${{ env.SERVER_HOST }}:3000"
+              echo "Web is up at http://${{ env.SERVER_HOST }}:3000"
+              WEB_OK=true
               break
             fi
-            echo "Attempt $i/12: Web not ready yet, waiting 5s..."
+            echo "Attempt $i/12: Web not ready, waiting 5s..."
             sleep 5
           done
 
           echo ""
-          echo "=== Deployment Summary ==="
-          echo "API: http://${{ env.SERVER_HOST }}:8080"
-          echo "Web: http://${{ env.SERVER_HOST }}:3000"
+          echo "=== Final Status ==="
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
-            'cd /opt/lowkey && docker compose ps'
+            'cd /opt/lowkey && docker compose ps && echo "" && docker compose logs --tail=20 vpn-server 2>/dev/null || true'
+
+          echo "API: http://${{ env.SERVER_HOST }}:8080"
+          echo "Web: http://${{ env.SERVER_HOST }}:3000"
+          $API_OK && $WEB_OK && echo "Deployment successful!" || echo "Warning: one or more services may not be ready — check logs above"
