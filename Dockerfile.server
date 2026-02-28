@@ -12,6 +12,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY vpn-common ./vpn-common
 COPY vpn-server ./vpn-server
 COPY vpn-client ./vpn-client
+# vpn-desktop/src-tauri is a workspace member — must be present for Cargo
+COPY vpn-desktop/src-tauri/Cargo.toml ./vpn-desktop/src-tauri/Cargo.toml
 
 # Build release binary
 RUN cargo build --release -p vpn-server
