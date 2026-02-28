@@ -42,7 +42,7 @@ jobs:
           sshpass -p "${{ secrets.SERVER_PASSWORD }}" \
             ssh -o StrictHostKeyChecking=no \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
-            'git clone --depth=1 https://github.com/Nopass0/lowkey.git /opt/lowkey && echo "Clone OK"'
+            'git clone --depth=1 --branch main https://github.com/Nopass0/lowkey.git /opt/lowkey && echo "Clone OK: $(cd /opt/lowkey && git log --oneline -1)"'
 
       - name: Write .env file on server
         env:
@@ -120,9 +120,10 @@ jobs:
 
             echo "=== Checking for vpn-desktop in workspace (should be absent) ==="
             if grep -q "vpn-desktop" Cargo.toml; then
-              echo "ERROR: vpn-desktop still in workspace! Running git reset --hard..."
+              echo "ERROR: vpn-desktop still in workspace! Forcing git reset..."
+              git remote set-url origin https://github.com/Nopass0/lowkey.git
               git fetch origin main
-              git reset --hard origin/main
+              git reset --hard FETCH_HEAD
               echo "After reset:"
               cat Cargo.toml
             else
