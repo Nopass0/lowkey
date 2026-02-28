@@ -9,8 +9,6 @@ env:
   SERVER_HOST: 89.169.54.87
   SERVER_USER: root
   DEPLOY_DIR: /opt/lowkey
-  # Public key is not sensitive — safe to embed in the workflow
-  DEPLOY_PUBKEY: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIjhCBRiFDH6/B7oFvTbezye5PL3IeiQmkoz4qQf8K1H github-actions-deploy"
 
 jobs:
   deploy:
@@ -25,27 +23,10 @@ jobs:
       - name: Install sshpass
         run: sudo apt-get install -y sshpass
 
-      - name: Bootstrap SSH key on server (idempotent)
+      - name: Stop and remove old deployment
         run: |
           sshpass -p "${{ secrets.SERVER_PASSWORD }}" \
             ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
-            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
-            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
-             grep -qF '${{ env.DEPLOY_PUBKEY }}' ~/.ssh/authorized_keys 2>/dev/null \
-               || echo '${{ env.DEPLOY_PUBKEY }}' >> ~/.ssh/authorized_keys && \
-             chmod 600 ~/.ssh/authorized_keys && \
-             echo 'SSH key bootstrap OK'"
-
-      - name: Set up SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ env.SERVER_HOST }} >> ~/.ssh/known_hosts
-
-      - name: Stop and remove old deployment
-        run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} '
             if [ -d /opt/lowkey ]; then
               cd /opt/lowkey
@@ -58,9 +39,10 @@ jobs:
 
       - name: Clone fresh code
         run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+          sshpass -p "${{ secrets.SERVER_PASSWORD }}" \
+            ssh -o StrictHostKeyChecking=no \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
-            'git clone --depth=1 https://github.com/Nopass0/lowkey.git /opt/lowkey && echo "Cloned OK"'
+            'git clone --depth=1 https://github.com/Nopass0/lowkey.git /opt/lowkey && echo "Clone OK"'
 
       - name: Write .env file on server
         env:
@@ -89,22 +71,25 @@ jobs:
           TG_BOT_TOKEN=${TG_BOT_TOKEN}
           TG_ADMIN_CHAT_ID=${TG_ADMIN_CHAT_ID}
           EOF
-          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+          sshpass -p "${{ secrets.SERVER_PASSWORD }}" \
+            scp -o StrictHostKeyChecking=no \
             /tmp/deploy.env \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }}:/opt/lowkey/.env
           echo ".env written to server"
 
       - name: Install Docker if needed
         run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+          sshpass -p "${{ secrets.SERVER_PASSWORD }}" \
+            ssh -o StrictHostKeyChecking=no \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
             'command -v docker &>/dev/null && echo "Docker already installed" || (curl -fsSL https://get.docker.com | sh && systemctl enable --now docker && echo "Docker installed")'
 
       - name: Build and start Docker Compose services
         run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+          sshpass -p "${{ secrets.SERVER_PASSWORD }}" \
+            ssh -o StrictHostKeyChecking=no \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
-            'cd /opt/lowkey && docker compose up -d --build --remove-orphans 2>&1 | tail -30 && echo "Docker Compose started"'
+            'cd /opt/lowkey && docker compose up -d --build --remove-orphans 2>&1 | tail -40 && echo "Services started"'
 
       - name: Wait for services and verify
         run: |
@@ -112,7 +97,8 @@ jobs:
           sleep 30
 
           echo "=== Docker service status ==="
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+          sshpass -p "${{ secrets.SERVER_PASSWORD }}" \
+            ssh -o StrictHostKeyChecking=no \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
             'cd /opt/lowkey && docker compose ps'
 
@@ -124,7 +110,7 @@ jobs:
               API_OK=true
               break
             fi
-            echo "Attempt $i/12: API not ready, waiting 5s..."
+            echo "Attempt $i/12: waiting 5s..."
             sleep 5
           done
 
@@ -136,16 +122,18 @@ jobs:
               WEB_OK=true
               break
             fi
-            echo "Attempt $i/12: Web not ready, waiting 5s..."
+            echo "Attempt $i/12: waiting 5s..."
             sleep 5
           done
 
           echo ""
-          echo "=== Final Status ==="
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+          echo "=== Server logs (last 30 lines) ==="
+          sshpass -p "${{ secrets.SERVER_PASSWORD }}" \
+            ssh -o StrictHostKeyChecking=no \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
-            'cd /opt/lowkey && docker compose ps && echo "" && docker compose logs --tail=20 vpn-server 2>/dev/null || true'
+            'cd /opt/lowkey && docker compose ps && echo "" && docker compose logs --tail=30 2>/dev/null | tail -30'
 
+          echo ""
           echo "API: http://${{ env.SERVER_HOST }}:8080"
           echo "Web: http://${{ env.SERVER_HOST }}:3000"
-          $API_OK && $WEB_OK && echo "Deployment successful!" || echo "Warning: one or more services may not be ready — check logs above"
+          $API_OK && $WEB_OK && echo "Deployment successful!" || echo "Warning: services may need more time — check logs above"
