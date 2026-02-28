@@ -132,6 +132,8 @@ jobs:
 
             echo "=== Cleaning Docker state ==="
             docker system prune -af 2>/dev/null || true
+            docker builder prune -af 2>/dev/null || true
+            docker buildx prune -af 2>/dev/null || true
 
             echo "=== Docker build context size check ==="
             du -sh vpn-common vpn-server vpn-client Cargo.toml Cargo.lock 2>/dev/null || true
