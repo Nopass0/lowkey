@@ -1,30 +1,38 @@
-# Rust build artifacts
-target/
+# Keep node_modules and build artifacts out of Docker build context
+# These are large and not needed inside the container
 
-# Node.js
-**/node_modules/
-**/npm-debug.log*
+# Node.js artifacts
+node_modules
+npm-debug.log*
+.npm
 
-# Desktop app dist
-vpn-desktop/dist/
-vpn-desktop/node_modules/
+# Specific node_modules paths
+vpn-desktop/node_modules
+web/.next
+web/node_modules
 
-# Git
-.git/
+# Rust build cache (large, not needed in build context)
+target
+
+# Desktop app artifacts
+vpn-desktop/dist
+
+# Git metadata
+.git
 .gitignore
 
-# GitHub Actions / CI
-.github/
+# CI/CD
+.github
 
-# IDE
-.vscode/
-.idea/
+# IDE files
+.vscode
+.idea
 *.swp
 *.swo
 
-# OS
+# OS files
 .DS_Store
 Thumbs.db
 
-# Docker build artifacts (don't recurse)
-**/target/
+# Local env files (written by CI to /opt/lowkey/.env separately)
+# .env is intentionally NOT excluded so it can be read by docker-compose
