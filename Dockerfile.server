@@ -12,6 +12,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY vpn-common ./vpn-common
 COPY vpn-server ./vpn-server
 COPY vpn-client ./vpn-client
+# migrations are embedded at compile time via include_str! in db.rs
+COPY migrations ./migrations
 
 # Build release binary
 RUN cargo build --release -p vpn-server
