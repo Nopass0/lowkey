@@ -108,8 +108,19 @@ jobs:
         run: |
           sshpass -p "${{ secrets.SERVER_PASSWORD }}" \
             ssh -o StrictHostKeyChecking=no \
-            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} \
-            'cd /opt/lowkey && docker compose build --no-cache 2>&1 | tail -50 && docker compose up -d --remove-orphans && echo "Services started"'
+            ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} '
+            cd /opt/lowkey
+            echo "=== Cleaning Docker cache ==="
+            docker system prune -f 2>/dev/null || true
+            docker builder prune -f 2>/dev/null || true
+            echo "=== Verifying repo contents ==="
+            ls -la vpn-desktop/src-tauri/Cargo.toml || echo "MISSING: vpn-desktop/src-tauri/Cargo.toml"
+            echo "=== Building ==="
+            docker compose build --no-cache 2>&1 | tail -60
+            echo "=== Starting services ==="
+            docker compose up -d --remove-orphans
+            echo "Services started"
+          '
 
       - name: Wait for services and verify
         run: |

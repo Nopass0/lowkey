@@ -1,0 +1,30 @@
+# Rust build artifacts
+target/
+
+# Node.js
+**/node_modules/
+**/npm-debug.log*
+
+# Desktop app dist
+vpn-desktop/dist/
+vpn-desktop/node_modules/
+
+# Git
+.git/
+.gitignore
+
+# GitHub Actions / CI
+.github/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker build artifacts (don't recurse)
+**/target/
