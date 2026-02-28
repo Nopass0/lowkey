@@ -110,13 +110,14 @@ jobs:
             ssh -o StrictHostKeyChecking=no \
             ${{ env.SERVER_USER }}@${{ env.SERVER_HOST }} '
             cd /opt/lowkey
-            echo "=== Cleaning Docker cache ==="
-            docker system prune -f 2>/dev/null || true
-            docker builder prune -f 2>/dev/null || true
-            echo "=== Verifying repo contents ==="
-            ls -la vpn-desktop/src-tauri/Cargo.toml || echo "MISSING: vpn-desktop/src-tauri/Cargo.toml"
+            echo "=== Cargo.toml content ==="
+            cat Cargo.toml
+            echo "=== Files in /opt/lowkey ==="
+            ls -la
+            echo "=== Cleaning Docker state ==="
+            docker system prune -af 2>/dev/null || true
             echo "=== Building ==="
-            docker compose build --no-cache 2>&1 | tail -60
+            DOCKER_BUILDKIT=1 docker compose build --no-cache --progress=plain 2>&1 | tail -80
             echo "=== Starting services ==="
             docker compose up -d --remove-orphans
             echo "Services started"
